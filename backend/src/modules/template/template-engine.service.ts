@@ -11,6 +11,26 @@ export interface TemplateContext {
   [key: string]: string | number | undefined;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Variable values include data a candidate typed into the public application
+// form (e.g. their name). Anything interpolated into HTML must be escaped, or
+// a crafted name would execute in the recruiter's dashboard.
+function escapeContext(context: TemplateContext): TemplateContext {
+  const escaped: TemplateContext = {};
+  for (const [key, value] of Object.entries(context)) {
+    escaped[key] = typeof value === "string" ? escapeHtml(value) : value;
+  }
+  return escaped;
+}
+
 export const templateEngineService = {
 
   replaceVariables(text: string, context: TemplateContext): string {
@@ -51,7 +71,9 @@ export const templateEngineService = {
     });
   },
 
-  renderHTML(body: TemplateBody, context: TemplateContext): string {
+  renderHTML(body: TemplateBody, rawContext: TemplateContext): string {
+    const context = escapeContext(rawContext);
+
     if (typeof body === "string") {
       return this.replaceVariables(body, context);
     }

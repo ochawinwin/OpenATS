@@ -19,6 +19,11 @@ const healthRedis = createRedisConnection();
 
 const app: Express = express();
 
+// Behind a reverse proxy (Railway, Render, ...) req.ip is the proxy's address
+// unless we trust the first X-Forwarded-For hop. Without this every visitor
+// shares one rate-limit bucket on the public routes.
+app.set("trust proxy", 1);
+
 app.use(helmet());
 
 function normalizeOrigin(origin: string): string {
@@ -104,7 +109,10 @@ app.use("/oauth", oauthRouter);
 
 app.use("/api", authMiddleware, apiLimiter, router);
 
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+// The interactive API docs are unauthenticated, so keep them out of production.
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+}
 
 app.use(errorMiddleware);
 
