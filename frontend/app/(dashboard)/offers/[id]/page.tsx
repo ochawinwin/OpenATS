@@ -183,7 +183,7 @@ export default function OfferDetailPage() {
   const isManager = role === "super_admin" || role === "hiring_manager";
 
   useEffect(() => {
-    if (role && !isManager) router.replace("/");
+    if (role && !isManager) router.replace("/dashboard");
   }, [role, isManager, router]);
 
   const params = useParams();

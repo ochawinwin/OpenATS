@@ -24,6 +24,15 @@ const nextConfig: NextConfig = {
         ? { exclude: ["error", "warn"] }
         : false,
   },
+  // The public landing page is a static file (public/landing/index.html) served at "/".
+  // The admin overview lives at /dashboard.
+  async rewrites() {
+    return {
+      beforeFiles: [{ source: "/", destination: "/landing/index.html" }],
+      afterFiles: [],
+      fallback: [],
+    };
+  },
   // Image optimization
   images: {
     formats: ["image/avif", "image/webp"],

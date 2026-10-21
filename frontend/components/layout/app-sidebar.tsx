@@ -22,7 +22,7 @@ import { useCurrentUser } from "@/hooks/queries/use-user";
 const navMainData = [
   {
     title: "Overview",
-    url: "/",
+    url: "/dashboard",
     icon: Home01Icon,
   },
   {
@@ -111,10 +111,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     })
     .map((item) => ({
       ...item,
-      isActive:
-        item.url === "/"
-          ? pathname === "/"
-          : pathname === item.url || pathname.startsWith(item.url + "/"),
+      isActive: pathname === item.url || pathname.startsWith(item.url + "/"),
     }));
 
   return (

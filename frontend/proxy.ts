@@ -5,6 +5,7 @@ import {
 import { NextResponse } from "next/server";
 
 const isPublicRoute = createRouteMatcher([
+  "/",
   "/login",
   "/careers",
   "/careers/*",
@@ -16,8 +17,10 @@ const isPublicRoute = createRouteMatcher([
 
 export const proxy = asgardeoMiddleware(
   async (asgardeo, request) => {
-    if (request.nextUrl.pathname === "/login" && asgardeo.isSignedIn()) {
-      return NextResponse.redirect(new URL("/", request.url));
+    // Signed-in staff skip the public landing page and the login form.
+    const { pathname } = request.nextUrl;
+    if ((pathname === "/login" || pathname === "/") && asgardeo.isSignedIn()) {
+      return NextResponse.redirect(new URL("/dashboard", request.url));
     }
 
     if (!isPublicRoute(request)) {

@@ -3,7 +3,7 @@ import OffersPageClient from "./_components/offers-client";
 
 export default function OffersPage() {
   return (
-    <ManagerGuard redirectTo="/">
+    <ManagerGuard redirectTo="/dashboard">
       <OffersPageClient />
     </ManagerGuard>
   );
