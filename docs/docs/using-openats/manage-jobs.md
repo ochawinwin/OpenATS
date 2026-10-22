@@ -56,7 +56,7 @@ Clear **Include Salary Information** when you do not want to publish salary deta
 
 Leave **Include Salary Information** selected, choose **Salary Range**, then set:
 
-- **Currency**: **USD**, **EUR**, or **LKR**.
+- **Currency**: **THB** (the default), **USD**, **EUR**, **GBP**, **LKR**, **INR**, or **AUD**.
 - **Paid Every**: **Hourly**, **Monthly**, or **Yearly**.
 - **Minimum Salary**: the lower value in the range.
 - **Maximum Salary**: the upper value in the range.

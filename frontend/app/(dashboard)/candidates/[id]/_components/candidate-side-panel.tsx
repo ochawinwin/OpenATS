@@ -40,6 +40,7 @@ import {
 } from "@/hooks/queries/use-offers";
 import { useCandidateAssessments } from "@/hooks/queries/use-assessments";
 import { useTemplates } from "@/hooks/queries/use-templates";
+import { CURRENCIES, DEFAULT_CURRENCY } from "@/lib/currency";
 
 function timeAgo(dateStr: string) {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -111,7 +112,7 @@ export function CandidateSidePanel({
 
   const [isEditingOffer, setIsEditingOffer] = useState(false);
   const [editSalary, setEditSalary] = useState("");
-  const [editCurrency, setEditCurrency] = useState("USD");
+  const [editCurrency, setEditCurrency] = useState<string>(DEFAULT_CURRENCY);
   const [editPayFreq, setEditPayFreq] = useState("monthly");
   const [editStartDate, setEditStartDate] = useState("");
   const [editExpiryDate, setEditExpiryDate] = useState("");
@@ -165,7 +166,7 @@ export function CandidateSidePanel({
   const openOfferEdit = () => {
     if (!offer) return;
     setEditSalary(offer.salary ? String(Number(offer.salary)) : "");
-    setEditCurrency(offer.currency ?? "USD");
+    setEditCurrency(offer.currency ?? DEFAULT_CURRENCY);
     setEditPayFreq(offer.payFrequency ?? "monthly");
     setEditStartDate(offer.startDate ?? "");
     setEditExpiryDate(offer.expiryDate ?? "");
@@ -534,7 +535,7 @@ export function CandidateSidePanel({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="rounded-lg shadow-lg border-slate-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-                      {["USD", "EUR", "GBP", "LKR", "INR", "AUD"].map((c) => (
+                      {CURRENCIES.map((c) => (
                         <SelectItem key={c} value={c} className="text-[13px]">
                           {c}
                         </SelectItem>

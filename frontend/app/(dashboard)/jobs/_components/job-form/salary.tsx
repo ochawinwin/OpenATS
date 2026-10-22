@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { CURRENCIES, DEFAULT_CURRENCY } from "@/lib/currency";
 import { PAY_FREQUENCY_LABELS } from "@/lib/job-labels";
 
 interface SalarySectionProps {
@@ -108,15 +109,17 @@ export function SalarySection({
                 </Label>
                 <Select
                   value={currency}
-                  onValueChange={(val) => onCurrencyChange(val || "USD")}
+                  onValueChange={(val) => onCurrencyChange(val || DEFAULT_CURRENCY)}
                 >
                   <SelectTrigger className="w-full h-10! bg-gray-100 dark:bg-neutral-800 border border-slate-300 dark:border-neutral-600 shadow-none rounded-lg text-slate-800 dark:text-neutral-200 focus:ring-0">
-                    <SelectValue placeholder="USD" />
+                    <SelectValue placeholder={DEFAULT_CURRENCY} />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg shadow-lg border-slate-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-                    <SelectItem value="USD">USD</SelectItem>
-                    <SelectItem value="EUR">EUR</SelectItem>
-                    <SelectItem value="LKR">LKR</SelectItem>
+                    {CURRENCIES.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

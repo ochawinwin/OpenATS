@@ -1,3 +1,4 @@
+import { DEFAULT_CURRENCY } from "@/lib/currency";
 import type { Job, JobDetail } from "@/types";
 
 export interface JobFormValues {
@@ -33,7 +34,7 @@ export const EMPTY_JOB_FORM_VALUES: JobFormValues = {
   description: "",
   isSalaryInfoIncluded: true,
   salaryType: "range",
-  currency: "USD",
+  currency: DEFAULT_CURRENCY,
   payFrequency: "yearly",
   salaryMin: "",
   salaryMax: "",
@@ -51,7 +52,7 @@ export function jobToFormValues(job: JobDetail): JobFormValues {
     description: job.description ?? "",
     isSalaryInfoIncluded: Boolean(job.salaryType),
     salaryType: job.salaryType === "fixed" ? "fixed" : "range",
-    currency: job.currency ?? "USD",
+    currency: job.currency ?? DEFAULT_CURRENCY,
     payFrequency: job.payFrequency ?? "yearly",
     salaryMin: job.salaryMin ? String(job.salaryMin) : "",
     salaryMax: job.salaryMax ? String(job.salaryMax) : "",

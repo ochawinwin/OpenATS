@@ -1342,7 +1342,7 @@ components:
             example: ["Node.js", "PostgreSQL", "Drizzle"],
           }
         salaryType: { type: string, enum: [range, fixed], example: "range" }
-        currency: { type: string, maxLength: 3, example: "USD" }
+        currency: { type: string, maxLength: 3, example: "THB" }
         payFrequency:
           {
             type: string,

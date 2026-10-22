@@ -16,6 +16,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DEFAULT_CURRENCY } from "@/lib/currency";
 
 // ─── Mock Data ───────────────────────────────────────────────────────────────
 type OfferStatus =
@@ -76,7 +77,7 @@ const OFFER_DATA: Record<number, OfferDetail> = {
     status: "Sent",
     templateName: "Software Engineering Offer Letter",
     salary: "5000",
-    currency: "USD",
+    currency: "THB",
     budgetMin: "4000",
     budgetMax: "6000",
     startDate: "2026-03-01",
@@ -94,7 +95,7 @@ const OFFER_DATA: Record<number, OfferDetail> = {
     status: "Pending",
     templateName: "General Update Email",
     salary: "1500",
-    currency: "USD",
+    currency: "THB",
     budgetMin: "1000",
     budgetMax: "2000",
     startDate: "2026-04-01",
@@ -112,7 +113,7 @@ const OFFER_DATA: Record<number, OfferDetail> = {
     status: "Accepted",
     templateName: "Backend Engineer Offer Letter",
     salary: "7000",
-    currency: "USD",
+    currency: "THB",
     budgetMin: "6000",
     budgetMax: "8000",
     startDate: "2026-03-15",
@@ -130,7 +131,7 @@ const OFFER_DATA: Record<number, OfferDetail> = {
     status: "Declined",
     templateName: "Software Engineering Offer Letter",
     salary: "4500",
-    currency: "USD",
+    currency: "THB",
     budgetMin: "4000",
     budgetMax: "5500",
     startDate: "2026-02-15",
@@ -148,7 +149,7 @@ const OFFER_DATA: Record<number, OfferDetail> = {
     status: "Withdrawn",
     templateName: "General Update Email",
     salary: "4000",
-    currency: "USD",
+    currency: "THB",
     budgetMin: "3500",
     budgetMax: "5000",
     startDate: "2026-02-01",
@@ -378,7 +379,7 @@ export default function OfferDetailPage() {
                     </div>
 
                     <p className="text-xs text-slate-500">
-                      *Budget Range For This Role: USD {offer.budgetMin} –{" "}
+                      *Budget Range For This Role: {DEFAULT_CURRENCY} {offer.budgetMin} –{" "}
                       {offer.budgetMax}
                     </p>
 

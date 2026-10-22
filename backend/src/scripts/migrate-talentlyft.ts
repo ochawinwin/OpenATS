@@ -6,9 +6,10 @@
  *
  * Flags:
  *   --apply                       write for real (default is a dry run that rolls every transaction back)
- *   --created-by=<email>          OpenATS user that owns the jobs/offers/notes (required with --apply)
+ *   --created-by=<email>          OpenATS user that owns the jobs and notes (required with --apply)
  *   --job=<tlJobId>               only this TalentLyft job (repeatable)
  *   --candidates=<id,id,...>      only these TalentLyft candidate ids (for a trial run)
+ *   --append                      add candidates to a job that was migrated before (default: skip existing jobs)
  *   --skip-resumes                do not mirror files to R2
  *   --mock-email-domain=<domain>  domain for candidates without an email (default no-email.invalid)
  *   --report=<path>               also write the JSON report to a file
@@ -23,7 +24,6 @@ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { asc, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
-  candidateActivities,
   candidateChatMessages,
   candidateCustomAnswers,
   candidateRejections,
@@ -35,7 +35,6 @@ import {
   jobHiringTeam,
   jobPipelineStages,
   jobs,
-  offers,
   pipelineStageTemplates,
   users,
 } from "../db/schema";
@@ -51,6 +50,7 @@ const values = (name: string) =>
 
 const APPLY = flag("apply");
 const SKIP_RESUMES = flag("skip-resumes");
+const APPEND = flag("append");
 const ONLY_JOBS = values("job").map(Number);
 const ONLY_CANDIDATES = values("candidates")
   .flatMap((v) => v.split(","))
@@ -400,7 +400,6 @@ type JobReport = {
   skipped: string[];
   withoutResume: number;
   commentsMigrated: number;
-  offersCreated: number;
   byStage: Record<string, number>;
   byStatus: Record<string, number>;
   rejectionTypes: Record<string, number>;
@@ -434,7 +433,6 @@ async function migrateJob(
     skipped: [],
     withoutResume: 0,
     commentsMigrated: 0,
-    offersCreated: 0,
     byStage: {},
     byStatus: {},
     rejectionTypes: {},
@@ -442,7 +440,7 @@ async function migrateJob(
 
   const slug = `tl-${job.Id}-${slugify(job.Title)}`.replace(/-+$/, "");
   const [existing] = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.slug, slug));
-  if (existing) {
+  if (existing && !APPEND) {
     report.status = "skipped_exists";
     report.openatsJobId = existing.id;
     return report;
@@ -614,76 +612,17 @@ async function migrateJob(
   // ── Phase B: one transaction per job ──
   try {
     await db.transaction(async (tx) => {
-      // department
-      const deptName = (job.Department?.Name ?? "General").trim().slice(0, 255) || "General";
-      let [dept] = await tx
-        .select()
-        .from(departments)
-        .where(sql`${departments.companyId} = ${ctx.companyId} and lower(${departments.name}) = ${deptName.toLowerCase()}`);
-      if (!dept) {
-        [dept] = await tx.insert(departments).values({ companyId: ctx.companyId, name: deptName }).returning();
-        report.departmentCreated = true;
-      }
-      if (!dept) throw new Error("Failed to resolve department");
-      report.department = dept.name;
-
-      const emp = mapEmploymentType(job.Title, job.Contract?.Text, dept.name);
-      report.employmentType = emp.value;
-      report.employmentTypeSource = emp.source;
-
-      const description = [job.Description, job.Requirements ? `<h3>Requirements</h3>${job.Requirements}` : null]
-        .filter(Boolean)
-        .join("\n");
-
-      const [newJob] = await tx
-        .insert(jobs)
-        .values({
-          title: job.Title.trim().slice(0, 255),
-          slug,
-          departmentId: dept.id,
-          employmentType: emp.value,
-          location: job.Location?.CityCountry?.trim().slice(0, 255) || null,
-          description: description ? pg(sanitizeHtml(description)) : null,
-          status: "published",
-          createdBy: ctx.createdBy,
-        })
-        .returning();
-      if (!newJob) throw new Error("Failed to insert job");
-      report.openatsJobId = newJob.id;
-
-      // pipeline stages from the default templates (same as jobService.create)
-      const stageRows = await tx
-        .insert(jobPipelineStages)
-        .values(
-          ctx.templates.map((t) => ({
-            jobId: newJob.id,
-            name: t.name,
-            position: t.position,
-            stageType: t.stageType,
-            sourceTemplateId: t.id,
-          })),
-        )
-        .returning();
-      const stageIdByName = new Map(stageRows.map((s) => [s.name, s.id]));
-      await tx.insert(jobHiringTeam).values({ jobId: newJob.id, userId: ctx.createdBy });
-
-      // questions: cover letter first (it is part of the TalentLyft application form), then screening questions
+      let newJob: { id: number };
+      let stageIdByName: Map<string, number>;
       const questionIdByTl = new Map<number, number>();
       let coverQuestionId: number | null = null;
-      let position = 1;
+      const seenEmails = new Set<string>();
+
+      // The questions as this script creates them, in order: cover letter first (it is part of the
+      // TalentLyft application form), then the screening questions.
+      const wanted: { tlId: number | null; title: string; type: QuestionType; required: boolean; fromFile: boolean }[] = [];
       if (coverField) {
-        const [q] = await tx
-          .insert(jobCustomQuestions)
-          .values({
-            jobId: newJob.id,
-            title: pg(coverField.DisplayName).slice(0, 500),
-            questionType: "long_answer",
-            isRequired: coverField.Required,
-            position: position++,
-          })
-          .returning();
-        coverQuestionId = q?.id ?? null;
-        report.questions++;
+        wanted.push({ tlId: null, title: pg(coverField.DisplayName).slice(0, 500), type: "long_answer", required: coverField.Required, fromFile: false });
       }
       for (const q of questions) {
         const type = mapQuestionType(q.Type);
@@ -692,25 +631,112 @@ async function migrateJob(
           continue;
         }
         const fromFile = q.Type === "file";
-        const [row] = await tx
-          .insert(jobCustomQuestions)
+        wanted.push({
+          tlId: q.Id,
+          title: pg(fromFile ? `${q.DisplayName} (ไฟล์แนบ)` : q.DisplayName).slice(0, 500),
+          type,
+          required: q.Required,
+          fromFile,
+        });
+      }
+
+      if (existing) {
+        // --append: add candidates to a job that was migrated before; reuse its stages and questions.
+        newJob = { id: existing.id };
+        report.openatsJobId = existing.id;
+        const stages = await tx.select().from(jobPipelineStages).where(eq(jobPipelineStages.jobId, existing.id));
+        stageIdByName = new Map(stages.map((st) => [st.name, st.id]));
+        const have = await tx
+          .select()
+          .from(jobCustomQuestions)
+          .where(eq(jobCustomQuestions.jobId, existing.id))
+          .orderBy(asc(jobCustomQuestions.position));
+        const used = new Set<number>();
+        for (const w of wanted) {
+          // match by title, so questions HR has reordered since the first migration still line up
+          const match = have.find((h) => !used.has(h.id) && h.title === w.title);
+          if (!match) {
+            report.unsupportedQuestions.push(`not found on the existing OpenATS job, answers dropped: ${w.title}`);
+            continue;
+          }
+          used.add(match.id);
+          if (w.tlId === null) coverQuestionId = match.id;
+          else questionIdByTl.set(w.tlId, match.id);
+        }
+        report.questions = used.size;
+        for (const row of await tx.select({ email: candidates.email }).from(candidates).where(eq(candidates.jobId, existing.id))) {
+          seenEmails.add(row.email);
+        }
+      } else {
+        // department
+        const deptName = (job.Department?.Name ?? "General").trim().slice(0, 255) || "General";
+        let [dept] = await tx
+          .select()
+          .from(departments)
+          .where(sql`${departments.companyId} = ${ctx.companyId} and lower(${departments.name}) = ${deptName.toLowerCase()}`);
+        if (!dept) {
+          [dept] = await tx.insert(departments).values({ companyId: ctx.companyId, name: deptName }).returning();
+          report.departmentCreated = true;
+        }
+        if (!dept) throw new Error("Failed to resolve department");
+        report.department = dept.name;
+
+        const emp = mapEmploymentType(job.Title, job.Contract?.Text, dept.name);
+        report.employmentType = emp.value;
+        report.employmentTypeSource = emp.source;
+
+        const description = [job.Description, job.Requirements ? `<h3>Requirements</h3>${job.Requirements}` : null]
+          .filter(Boolean)
+          .join("\n");
+
+        const [created] = await tx
+          .insert(jobs)
           .values({
-            jobId: newJob.id,
-            title: pg(fromFile ? `${q.DisplayName} (ไฟล์แนบ)` : q.DisplayName).slice(0, 500),
-            questionType: type,
-            isRequired: q.Required,
-            position: position++,
+            title: job.Title.trim().slice(0, 255),
+            slug,
+            departmentId: dept.id,
+            employmentType: emp.value,
+            location: job.Location?.CityCountry?.trim().slice(0, 255) || null,
+            description: description ? pg(sanitizeHtml(description)) : null,
+            status: "published",
+            createdBy: ctx.createdBy,
           })
           .returning();
-        if (row) {
-          questionIdByTl.set(q.Id, row.id);
+        if (!created) throw new Error("Failed to insert job");
+        newJob = created;
+        report.openatsJobId = created.id;
+
+        // pipeline stages from the default templates (same as jobService.create)
+        const stageRows = await tx
+          .insert(jobPipelineStages)
+          .values(
+            ctx.templates.map((t) => ({
+              jobId: created.id,
+              name: t.name,
+              position: t.position,
+              stageType: t.stageType,
+              sourceTemplateId: t.id,
+            })),
+          )
+          .returning();
+        stageIdByName = new Map(stageRows.map((st) => [st.name, st.id]));
+        await tx.insert(jobHiringTeam).values({ jobId: created.id, userId: ctx.createdBy });
+
+        let position = 1;
+        for (const w of wanted) {
+          const [row] = await tx
+            .insert(jobCustomQuestions)
+            .values({ jobId: created.id, title: w.title, questionType: w.type, isRequired: w.required, position: position++ })
+            .returning();
+          if (!row) continue;
+          if (w.tlId === null) coverQuestionId = row.id;
+          else questionIdByTl.set(w.tlId, row.id);
           report.questions++;
-          if (fromFile) report.questionsFromFileType++;
+          if (w.fromFile) report.questionsFromFileType++;
         }
       }
 
       // candidates
-      const seenEmails = new Set<string>();
       for (const plan of plans) {
         if ("skip" in plan) {
           report.skipped.push(plan.skip);
@@ -763,26 +789,6 @@ async function migrateJob(
             emailStatus: "not_sent",
             rejectedAt: plan.rejection.at,
           });
-        }
-
-        // The app creates a draft offer whenever a candidate enters an Offer-type stage (Offer, Hired).
-        if (!rejected && (plan.stageName === "Offer" || plan.stageName === "Hired")) {
-          const [offer] = await tx
-            .insert(offers)
-            .values({ candidateId: cand.id, jobId: newJob.id, status: "draft", createdBy: ctx.createdBy, createdAt: plan.stageSince })
-            .returning();
-          if (offer) {
-            await tx.insert(candidateActivities).values({
-              candidateId: cand.id,
-              jobId: newJob.id,
-              offerId: offer.id,
-              stageId: currentId,
-              actorId: ctx.createdBy,
-              eventType: "offer_created",
-              createdAt: plan.stageSince,
-            });
-            report.offersCreated++;
-          }
         }
 
         const answerRows: { candidateId: number; questionId: number; answerText: string }[] = [];

@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { serverFetch } from "@/lib/auth-action";
+import { CURRENCIES as CURRENCY_CODES, DEFAULT_CURRENCY } from "@/lib/currency";
 import {
   EMPLOYMENT_LABELS,
   OFFER_FIELD_LABELS,
@@ -28,7 +29,7 @@ import {
 import { OfferLetterDialog } from "./offer-letter-dialog";
 import type { Offer, Template } from "@/types";
 
-const CURRENCIES = ["USD", "EUR", "GBP", "LKR", "INR", "AUD"].map((c) => ({
+const CURRENCIES = CURRENCY_CODES.map((c) => ({
   value: c,
   label: c,
 }));
@@ -178,7 +179,7 @@ export function OfferEditForm({
               <Select
                 items={CURRENCIES}
                 value={values.currency}
-                onValueChange={(v) => set("currency", v ?? "USD")}
+                onValueChange={(v) => set("currency", v ?? DEFAULT_CURRENCY)}
               >
                 <SelectTrigger className={`${selectTriggerCls} w-24! shrink-0`} aria-label="Currency">
                   <SelectValue />

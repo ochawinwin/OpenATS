@@ -1,3 +1,4 @@
+import { DEFAULT_CURRENCY } from "@/lib/currency";
 import type { Offer } from "@/types";
 
 export type EmploymentType = NonNullable<Offer["employmentType"]>;
@@ -48,7 +49,7 @@ export const OFFER_FIELD_LABELS: Record<OfferFieldKey, string> = {
 export function offerToFormValues(offer: Offer): OfferFormValues {
   return {
     templateId: offer.templateId ? String(offer.templateId) : "",
-    currency: offer.currency ?? "USD",
+    currency: offer.currency ?? DEFAULT_CURRENCY,
     salary: offer.salary ? String(Number(offer.salary)) : "",
     employmentType: offer.employmentType ?? "full_time",
     startDate: offer.startDate ?? "",

@@ -34,6 +34,16 @@ const offer = (over: Partial<Offer> = {}): Offer => ({
 
 const complete: OfferFormValues = offerToFormValues(offer());
 
+describe("offerToFormValues", () => {
+  it("defaults the currency to THB when the offer has none", () => {
+    expect(offerToFormValues(offer({ currency: null })).currency).toBe("THB");
+  });
+
+  it("keeps a currency that was already chosen", () => {
+    expect(offerToFormValues(offer({ currency: "USD" })).currency).toBe("USD");
+  });
+});
+
 describe("getMissingFields", () => {
   it("finds nothing missing on a complete offer", () => {
     expect(getMissingFields(complete)).toEqual([]);

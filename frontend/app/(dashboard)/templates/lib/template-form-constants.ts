@@ -27,7 +27,7 @@ export const SAMPLE: Record<string, string> = {
   company_name: "OpenATS Inc.",
   start_date: "August 18, 2026",
   salary: "120,000",
-  currency: "USD",
+  currency: "THB",
   employment_type: "Full-time",
   reporting_manager: "Jamie Rivera",
   benefits: "Health insurance, 401(k) match, unlimited PTO",
