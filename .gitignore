@@ -4,3 +4,12 @@ playwright-report/
 playwright/.cache/
 # Test coverage reports
 coverage/
+
+# Environment variables (never commit secrets!)
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
