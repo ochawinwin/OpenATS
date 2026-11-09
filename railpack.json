@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "steps": {
+    "install": {
+      "commands": [
+        { "src": ".pnpmfile.cjs", "dest": ".pnpmfile.cjs" },
+        "..."
+      ]
+    }
+  }
+}
