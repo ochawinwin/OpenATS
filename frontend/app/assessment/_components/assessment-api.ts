@@ -1,10 +1,10 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+import { browserApiUrl } from "@/lib/api-url";
 
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const res = await fetch(`${API_BASE}/public${path}`, {
+  const res = await fetch(`${browserApiUrl()}/public${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...options.headers },
   });
@@ -21,8 +21,11 @@ export function fetchAttempt(token: string) {
   );
 }
 
+/** Start the clock. Returns the server start time */
 export function startAttempt(token: string) {
-  return apiFetch(`/assessment/${token}/start`, { method: "POST" });
+  return apiFetch<{ data: { startedAt: string | null } | null }>(`/assessment/${token}/start`, {
+    method: "POST",
+  });
 }
 
 export function saveAnswer(token: string, payload: unknown) {
@@ -35,7 +38,7 @@ export function saveAnswer(token: string, payload: unknown) {
 export function completeAttempt(token: string, reason?: string) {
   return apiFetch<{
     message: string;
-    data: import("../_lib/assessment-types").ScoreResult;
+    data: { completed: boolean };
   }>(`/assessment/${token}/complete`, {
     method: "POST",
     body: JSON.stringify(reason ? { autoSubmitReason: reason } : {}),

@@ -1,4 +1,6 @@
 import { Request, Response } from "express";
+import { previewSystemEmail } from "../../shared/services/system-email-preview";
+import { getCompanyForEmail } from "../../shared/services/candidate-mailer";
 import { z } from "zod";
 import { templateService } from "./template.service";
 import { templateEngineService } from "./template-engine.service";
@@ -6,6 +8,11 @@ import logger from "../../utils/logger";
 import { getErrorCode, getErrorMessage} from "../../utils/error.utils";
 import { asEnum } from "../../utils/object.utils";
 import { templates } from "../../db/schema";
+import {
+  SystemEmailError,
+  isSystemEmailPurpose,
+  systemEmailService,
+} from "../../shared/services/system-emails";
 
 const contentBlockSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("heading"), content: z.string() }),
@@ -236,5 +243,89 @@ export const previewTemplate = async (req: Request, res: Response) => {
       `Failed to preview template id=${req.params.id} - user ${req.user?.id}: ${getErrorMessage(error)}`,
     );
     res.status(500).json({ error: "Failed to preview template" });
+  }
+};
+
+const systemEmailSchema = z.object({
+  subject: z.string().trim().min(1, "Subject is required").max(500),
+  bodyHtml: z.string().trim().min(1, "Message is required").max(50_000),
+});
+
+// Looser than saving: a half-written email, even an empty one, can still be previewed.
+const systemEmailPreviewSchema = z.object({
+  subject: z.string().max(500),
+  bodyHtml: z.string().max(50_000),
+});
+
+export const listSystemEmails = async (_req: Request, res: Response) => {
+  try {
+    res.status(200).json({ data: await systemEmailService.list() });
+  } catch (error) {
+    logger.error(`Failed to list system emails: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to load the automatic emails" });
+  }
+};
+
+export const saveSystemEmail = async (req: Request, res: Response) => {
+  const purpose = String(req.params.purpose ?? "");
+  if (!isSystemEmailPurpose(purpose)) {
+    res.status(404).json({ error: "No such automatic email" });
+    return;
+  }
+  const parsed = systemEmailSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Validation failed" });
+    return;
+  }
+  try {
+    await systemEmailService.save(purpose, parsed.data, req.user.id);
+    res.status(200).json({ data: { purpose } });
+  } catch (error) {
+    if (error instanceof SystemEmailError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    logger.error(`Failed to save system email ${purpose}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to save the email" });
+  }
+};
+
+/**
+ * The email as a candidate would receive it, with the wording being typed and made-up details.
+ * Nothing is saved, so anyone who may open the editor may see it. An unknown {{variable}} is not
+ * an error here: it shows in the preview as typed, which is what tells the person it is wrong.
+ */
+export const previewSystemEmailHandler = async (req: Request, res: Response) => {
+  const purpose = String(req.params.purpose ?? "");
+  if (!isSystemEmailPurpose(purpose)) {
+    res.status(404).json({ error: "No such automatic email" });
+    return;
+  }
+  const parsed = systemEmailPreviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Validation failed" });
+    return;
+  }
+  try {
+    const email = previewSystemEmail(purpose, parsed.data, await getCompanyForEmail());
+    res.status(200).json({ data: email });
+  } catch (error) {
+    logger.error(`Failed to preview system email ${purpose}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to build the preview" });
+  }
+};
+
+export const resetSystemEmail = async (req: Request, res: Response) => {
+  const purpose = String(req.params.purpose ?? "");
+  if (!isSystemEmailPurpose(purpose)) {
+    res.status(404).json({ error: "No such automatic email" });
+    return;
+  }
+  try {
+    await systemEmailService.reset(purpose);
+    res.status(200).json({ data: { purpose } });
+  } catch (error) {
+    logger.error(`Failed to reset system email ${purpose}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to reset the email" });
   }
 };

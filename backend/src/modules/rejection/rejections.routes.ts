@@ -1,14 +1,14 @@
 import { Router } from "express";
+import { requireCandidateView } from "../../middlewares/job-access.middleware";
 import { requireManager } from "../../middlewares/role.middleware";
+import { canViewCandidates } from "../../shared/auth/job-access";
 import { z } from "zod";
-import { rejectionService } from "./rejection.service";
-import { templateEngineService } from "../template/template-engine.service";
-import { variableService } from "../template/variable.service";
+import { rejectionService, RejectionError } from "./rejection.service";
 import { db } from "../../db";
-import { templates, candidates } from "../../db/schema";
+import { candidates } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import logger from "../../utils/logger";
-import { getErrorMessage} from "../../utils/error.utils";
+import { getErrorMessage, safeErrorMessage } from "../../utils/error.utils";
 
 const router: Router = Router();
 
@@ -26,8 +26,57 @@ const rejectSchema = z
     message: "Template is required when sending email",
   });
 
+const bulkRejectSchema = z.object({
+  candidateIds: z
+    .array(z.number().int().positive())
+    .min(1, "Pick at least one candidate")
+    .max(200, "Reject at most 200 candidates at a time"),
+  reason: z.string().trim().min(1, "Reason is required").max(255),
+});
+
+// POST /candidates/bulk/reject — reject several candidates with one reason, sending no email.
+// Each is its own transaction, so one that cannot be rejected does not stop the rest.
+router.post("/candidates/bulk/reject", requireManager, async (req, res) => {
+  const parsed = bulkRejectSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Validation failed", details: parsed.error.flatten().fieldErrors });
+    return;
+  }
+  if (!(await canViewCandidates(req.user, parsed.data.candidateIds))) {
+    res.status(403).json({ error: "You do not have access to some of these candidates" });
+    return;
+  }
+  const rejected: number[] = [];
+  const failed: { id: number; error: string }[] = [];
+  for (const id of new Set(parsed.data.candidateIds)) {
+    try {
+      await rejectionService.reject(
+        {
+          candidateId: id,
+          reason: parsed.data.reason,
+          internalNote: null,
+          templateId: null,
+          emailStatus: "not_sent",
+        },
+        req.user.id,
+      );
+      rejected.push(id);
+    } catch (error) {
+      // Say why a candidate was skipped when that is expected; keep database errors out of the reply.
+      if (error instanceof RejectionError) {
+        failed.push({ id, error: error.message });
+      } else {
+        logger.error(`Bulk rejection failed for candidate ${id} - user ${req.user.id}: ${getErrorMessage(error)}`);
+        failed.push({ id, error: "Failed to reject candidate" });
+      }
+    }
+  }
+  logger.info(`Bulk rejection: rejected=${rejected.length}, failed=${failed.length} by user ${req.user.id}`);
+  res.status(200).json({ data: { rejected, failed } });
+});
+
 // POST /candidates/:id/reject — reject a candidate
-router.post("/candidates/:id/reject", requireManager, async (req, res) => {
+router.post("/candidates/:id/reject", requireManager, requireCandidateView("id"), async (req, res) => {
   try {
     const id = parseInt((req.params.id ?? "").toString());
     if (isNaN(id)) {
@@ -55,33 +104,9 @@ router.post("/candidates/:id/reject", requireManager, async (req, res) => {
       return;
     }
 
-    // If sending email with a template, render it for preview/reference
-    let renderedSubject = "";
-    let renderedHtml = "";
-
-    if (parsed.data.templateId && parsed.data.emailStatus === "sent") {
-      const [template] = await db
-        .select()
-        .from(templates)
-        .where(eq(templates.id, parsed.data.templateId));
-
-      if (template) {
-        const context = await variableService.getContextForCandidate(id);
-        const compiled = templateEngineService.compileTemplate(
-          template.subject,
-          template.bodyJson,
-          context,
-        );
-        renderedSubject = compiled.subject;
-        renderedHtml = compiled.html;
-      }
-    }
-
     const rejection = await rejectionService.reject(
       {
         candidateId: id,
-        jobId: candidate.jobId,
-        fromStageId: candidate.currentStageId,
         reason: parsed.data.reason,
         internalNote: parsed.data.internalNote ?? null,
         templateId: parsed.data.templateId ?? null,
@@ -90,21 +115,15 @@ router.post("/candidates/:id/reject", requireManager, async (req, res) => {
       req.user.id,
     );
 
-    res.status(201).json({
-      data: {
-        ...rejection,
-        renderedSubject: renderedSubject || null,
-        renderedHtml: renderedHtml || null,
-      },
-    });
+    res.status(201).json({ data: rejection });
   } catch (error) {
     logger.error(`Failed to reject candidate ${req.params.id}: ${getErrorMessage(error)}`);
-    res.status(400).json({ error: getErrorMessage(error) || "Failed to reject candidate" });
+    res.status(400).json({ error: error instanceof RejectionError ? error.message : safeErrorMessage(error, "Failed to reject candidate") });
   }
 });
 
 // POST /candidates/:id/unreject — restore a rejected candidate
-router.post("/candidates/:id/unreject", requireManager, async (req, res) => {
+router.post("/candidates/:id/unreject", requireManager, requireCandidateView("id"), async (req, res) => {
   try {
     const id = parseInt((req.params.id ?? "").toString());
     if (isNaN(id)) {
@@ -116,12 +135,12 @@ router.post("/candidates/:id/unreject", requireManager, async (req, res) => {
     res.status(200).json({ data: result });
   } catch (error) {
     logger.error(`Failed to unreject candidate ${req.params.id}: ${getErrorMessage(error)}`);
-    res.status(400).json({ error: getErrorMessage(error) || "Failed to unreject candidate" });
+    res.status(400).json({ error: error instanceof RejectionError ? error.message : safeErrorMessage(error, "Failed to unreject candidate") });
   }
 });
 
 // GET /candidates/:id/rejections — get rejection history
-router.get("/candidates/:id/rejections", async (req, res) => {
+router.get("/candidates/:id/rejections", requireCandidateView("id"), async (req, res) => {
   try {
     const id = parseInt((req.params.id ?? "").toString());
     if (isNaN(id)) {
@@ -134,52 +153,6 @@ router.get("/candidates/:id/rejections", async (req, res) => {
   } catch (error) {
     logger.error(`Failed to fetch rejections: ${getErrorMessage(error)}`);
     res.status(500).json({ error: "Failed to fetch rejections" });
-  }
-});
-
-// POST /templates/:id/preview — preview a rendered template for a candidate
-router.post("/templates/:id/preview", async (req, res) => {
-  try {
-    const templateId = parseInt((req.params.id ?? "").toString());
-    const candidateId = req.body?.candidateId
-      ? parseInt(req.body.candidateId)
-      : undefined;
-
-    if (isNaN(templateId)) {
-      res.status(400).json({ error: "Invalid template ID" });
-      return;
-    }
-
-    const [template] = await db
-      .select()
-      .from(templates)
-      .where(eq(templates.id, templateId));
-
-    if (!template) {
-      res.status(404).json({ error: "Template not found" });
-      return;
-    }
-
-    // Use candidate context if provided
-    const context = candidateId
-      ? await variableService.getContextForCandidate(candidateId)
-      : { candidate_name: "John Doe", job_title: "Software Engineer", company_name: "Your Company" };
-
-    const compiled = templateEngineService.compileTemplate(
-      template.subject,
-      template.bodyJson,
-      context,
-    );
-
-    res.status(200).json({
-      data: {
-        subject: compiled.subject,
-        html: compiled.html,
-      },
-    });
-  } catch (error) {
-    logger.error(`Failed to preview template: ${getErrorMessage(error)}`);
-    res.status(500).json({ error: "Failed to preview template" });
   }
 });
 

@@ -1,0 +1,215 @@
+/**
+ * Create the first super admin, or promote a user.
+ * pnpm --filter ./frontend exec tsx scripts/create-admin.ts --email ada@example.com --first-name Ada --last-name Lovelace
+ * Missing values are asked for. The password is never printed
+ *
+ * --if-none: do nothing when a super admin already exists. For the Docker setup step, which runs
+ * on every start. OPENATS_ADMIN_PASSWORD, when set, is used as the password, so it need not be
+ * passed on the command line.
+ */
+import path from "node:path";
+import readline from "node:readline";
+import { Writable } from "node:stream";
+import { parseArgs } from "node:util";
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_RULE,
+} from "../lib/auth/errors";
+import { checkEnv } from "../lib/env";
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function fail(message: string): never {
+  console.error(`\n${message}\n`);
+  process.exit(1);
+}
+
+function ask(question: string, opts: { hidden?: boolean } = {}) {
+  if (!process.stdin.isTTY) {
+    fail(
+      "A required value is missing and there is no terminal to ask for it. Pass --email, --first-name, --last-name and --password.",
+    );
+  }
+
+  return new Promise<string>((resolve) => {
+    let muted = false;
+    const output = new Writable({
+      write(chunk, _encoding, callback) {
+        if (!muted) process.stdout.write(chunk);
+        callback();
+      },
+    });
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output,
+      terminal: true,
+    });
+
+    rl.question(question, (answer) => {
+      rl.close();
+      if (opts.hidden) process.stdout.write("\n");
+      resolve(answer);
+    });
+
+    // Mute so the password isn't shown
+    muted = Boolean(opts.hidden);
+  });
+}
+
+function passwordProblem(password: string): string | null {
+  if (
+    password.length < PASSWORD_MIN_LENGTH ||
+    password.length > PASSWORD_MAX_LENGTH
+  ) {
+    return PASSWORD_RULE;
+  }
+  return null;
+}
+
+async function readInputs() {
+  const { values } = parseArgs({
+    options: {
+      email: { type: "string" },
+      "first-name": { type: "string" },
+      "last-name": { type: "string" },
+      password: { type: "string" },
+      "if-none": { type: "boolean" },
+    },
+  });
+
+  const email = (values.email ?? (await ask("Admin email: ")))
+    .trim()
+    .toLowerCase();
+  if (!EMAIL_PATTERN.test(email)) fail(`"${email}" is not a valid email.`);
+
+  const firstName = (values["first-name"] ?? (await ask("First name: "))).trim();
+  const lastName = (values["last-name"] ?? (await ask("Last name: "))).trim();
+  if (!firstName || !lastName) fail("First name and last name are required.");
+
+  let password = values.password ?? process.env.OPENATS_ADMIN_PASSWORD;
+  if (password === undefined) {
+    password = await ask(`Password (${PASSWORD_RULE.toLowerCase()}): `, {
+      hidden: true,
+    });
+    const confirmation = await ask("Confirm password: ", { hidden: true });
+    if (password !== confirmation) fail("The passwords do not match.");
+  }
+
+  const problem = passwordProblem(password);
+  if (problem) fail(`Password not accepted. ${problem}`);
+
+  return { email, firstName, lastName, password };
+}
+
+async function main() {
+  // Load frontend/.env ourselves outside Next.js
+  try {
+    process.loadEnvFile(path.join(__dirname, "../.env"));
+  } catch {
+    // No .env file: rely on the environment as it is.
+  }
+
+  const issues = checkEnv(process.env);
+  if (issues.length > 0) {
+    fail(
+      `Missing or invalid environment variables:\n${issues
+        .map((issue) => `  - ${issue}`)
+        .join("\n")}\n\nCheck frontend/.env against frontend/.env.example.`,
+    );
+  }
+
+  if (parseArgs({ options: { "if-none": { type: "boolean" } }, strict: false }).values["if-none"]) {
+    const { pool } = await import("../lib/auth/db");
+    const admins = await pool.query("select 1 from users where role = 'super_admin' limit 1");
+    if (admins.rows.length > 0) {
+      console.log("A super admin already exists, so none was created.");
+      await pool.end();
+      return;
+    }
+  }
+
+  const { email, firstName, lastName, password } = await readInputs();
+
+  // Import late, they read env on load
+  const { betterAuth } = await import("better-auth");
+  const { authOptions } = await import("../lib/auth/options");
+  const { pool } = await import("../lib/auth/db");
+
+  // Own instance, no nextCookies()
+  const auth = betterAuth(authOptions);
+
+  try {
+    // Match case insensitive, old rows may have mixed case
+    const existing = await pool.query<{ id: number }>(
+      "select id from users where lower(email) = $1",
+      [email],
+    );
+
+    if (existing.rows.length > 1) {
+      fail(
+        `More than one user matches ${email} when case is ignored. Resolve the duplicate rows first.`,
+      );
+    }
+
+    if (existing.rows.length === 0) {
+      const { user } = await auth.api.createUser({
+        body: {
+          email,
+          password,
+          name: `${firstName} ${lastName}`,
+          role: "super_admin",
+          data: { firstName, lastName },
+        },
+      });
+
+      console.log(`\nCreated super admin ${email} (user id ${user.id}).`);
+      return;
+    }
+
+    // Keep the existing user row and its links
+    const userId = String(existing.rows[0].id);
+    const ctx = await auth.$context;
+
+    await ctx.internalAdapter.updateUser(userId, {
+      // Store lower case for sign in
+      email,
+      role: "super_admin",
+      banned: false,
+      banReason: null,
+      banExpires: null,
+      isActive: true,
+    });
+
+    const hash = await ctx.password.hash(password);
+    if (await ctx.internalAdapter.findCredentialAccount(userId)) {
+      await ctx.internalAdapter.updatePassword(userId, hash);
+    } else {
+      // Old users without a password
+      await ctx.internalAdapter.linkAccount({
+        userId,
+        providerId: "credential",
+        accountId: userId,
+        password: hash,
+      });
+    }
+
+    // Sign out old sessions after the password changes
+    await ctx.internalAdapter.deleteUserSessions(userId);
+
+    console.log(
+      `\nUpdated ${email} (user id ${userId}): role set to super_admin, account active, password set.`,
+    );
+  } finally {
+    await pool.end();
+  }
+}
+
+main().catch((error: unknown) => {
+  // Only the message, the error may hold the body
+  console.error(
+    `\nCould not create the admin: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
+  process.exit(1);
+});

@@ -1,19 +1,31 @@
 "use client";
 
 import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { useSocketToken } from "@/components/providers/socket-auth-provider";
 import { boardKey } from "@/hooks/queries/use-candidates";
+import { NOTIFICATIONS_KEY } from "@/hooks/queries/use-notifications";
 import { createAuthedSocket } from "@/lib/socket";
 
 export function useCandidateSocket() {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const token = useSocketToken();
 
   useEffect(() => {
     if (!token) return;
 
     const socket = createAuthedSocket(token);
+
+    // Mark the candidate stale but don't refetch while open
+    const candidateChanged = (candidateId: number) => {
+      queryClient.invalidateQueries({ queryKey: ["candidates", candidateId], exact: true, refetchType: "none" });
+      queryClient.invalidateQueries({ queryKey: ["candidate-assessments", candidateId], refetchType: "none" });
+      queryClient.invalidateQueries({ queryKey: ["attempt-results"], refetchType: "none" });
+      queryClient.invalidateQueries({ queryKey: ["interview-feedback"], refetchType: "none" });
+    };
 
     socket.on("candidate_applied", (data: { jobId: number }) => {
       queryClient.invalidateQueries({ queryKey: boardKey(data.jobId) });
@@ -29,9 +41,7 @@ export function useCandidateSocket() {
     socket.on(
       "cv_analysis_updated",
       (data: { candidateId: number; jobId: number; status: string }) => {
-        queryClient.invalidateQueries({
-          queryKey: ["candidates", data.candidateId],
-        });
+        candidateChanged(data.candidateId);
 
         queryClient.invalidateQueries({
           predicate: (query) => {
@@ -47,9 +57,7 @@ export function useCandidateSocket() {
       "candidate_stage_changed",
       (data: { candidateId: number; jobId: number; stageId: number }) => {
         queryClient.invalidateQueries({ queryKey: boardKey(data.jobId) });
-        queryClient.invalidateQueries({
-          queryKey: ["candidates", data.candidateId],
-        });
+        candidateChanged(data.candidateId);
 
         queryClient.invalidateQueries({
           predicate: (query) => {
@@ -65,9 +73,7 @@ export function useCandidateSocket() {
       "offer_changed",
       (data: { offerId: number; candidateId: number; jobId: number }) => {
         queryClient.invalidateQueries({ queryKey: ["offers"] });
-        queryClient.invalidateQueries({
-          queryKey: ["candidates", data.candidateId],
-        });
+        candidateChanged(data.candidateId);
       },
     );
 
@@ -75,32 +81,34 @@ export function useCandidateSocket() {
       "interview_changed",
       (data: { interviewId: number; candidateId: number }) => {
         queryClient.invalidateQueries({ queryKey: ["interviews"] });
-        queryClient.invalidateQueries({
-          queryKey: ["interview-feedback", data.interviewId],
-        });
-        queryClient.invalidateQueries({
-          queryKey: ["candidates", data.candidateId],
-        });
+        candidateChanged(data.candidateId);
+        // The candidate's interviews come with the candidate, and a candidate picking a time
+        // happens while the team may be looking at it, so refetch it if it is on screen.
+        queryClient.invalidateQueries({ queryKey: ["candidates", data.candidateId], exact: true });
       },
     );
 
     socket.on(
       "assessment_progress_updated",
       (data: { candidateId: number; attemptId: number }) => {
-        queryClient.invalidateQueries({
-          queryKey: ["candidate-assessments", data.candidateId],
-        });
-        queryClient.invalidateQueries({
-          queryKey: ["attempt-results", data.attemptId],
-        });
-        queryClient.invalidateQueries({
-          queryKey: ["candidates", data.candidateId],
-        });
+        candidateChanged(data.candidateId);
       },
     );
+
+    // Something new in this user's own list: the server only says that, the list is fetched.
+    socket.on("notifications_changed", () => {
+      queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
+    });
+
+    socket.on("assignment_submitted", (data: { candidateId: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["candidate-assignments", data.candidateId] });
+      toast.message("An assignment was handed in", {
+        action: { label: "View", onClick: () => router.push(`/candidates/${data.candidateId}`) },
+      });
+    });
 
     return () => {
       socket.disconnect();
     };
-  }, [queryClient, token]);
+  }, [queryClient, router, token]);
 }

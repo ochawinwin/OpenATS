@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { toast } from "sonner";
+import { useMemo } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
-import { useCurrentUser } from "@/hooks/queries/use-user";
+import { RoleGuard } from "@/components/guards/role-guard";
+import { NotFoundState } from "@/components/not-found-state";
+import { Button } from "@/components/ui/button";
 import { useDepartments } from "@/hooks/queries/use-company";
 import { useJob, useUpdateJob } from "@/hooks/queries/use-jobs";
 import { buildUpdateJobPayload } from "@/lib/jobs-utils";
@@ -15,17 +18,18 @@ import {
 } from "../../_components/job-form/job-form-values";
 
 export default function EditJobPage() {
+  const { id } = useParams<{ id: string }>();
+  return (
+    <RoleGuard allow="manager" redirectTo={`/jobs/${id}`}>
+      <EditJob />
+    </RoleGuard>
+  );
+}
+
+function EditJob() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const jobId = Number(params.id);
-
-  const { data: currentUserRes } = useCurrentUser();
-  const role = currentUserRes?.data?.role;
-  const isManager = role === "super_admin" || role === "hiring_manager";
-
-  useEffect(() => {
-    if (role && !isManager) router.replace(`/jobs/${jobId}`);
-  }, [role, isManager, router, jobId]);
 
   const { data: deptData } = useDepartments();
   const { data: jobData, isLoading: isJobLoading } = useJob(jobId);
@@ -39,7 +43,7 @@ export default function EditJobPage() {
 
   const handleSubmit = (values: ValidJobFormValues) => {
     if (!job) return;
-    // The switch only toggles published; any other status is preserved.
+    // Only toggle published, keep other statuses
     const status = values.isActive
       ? "published"
       : job.status === "published"
@@ -47,11 +51,13 @@ export default function EditJobPage() {
         : job.status;
 
     updateJob.mutate(buildUpdateJobPayload({ ...values, status }), {
-      onSuccess: () => router.push(`/jobs/${jobId}`),
+      onSuccess: () => {
+        toast.success("Job updated");
+        router.push(`/jobs/${jobId}`);
+      },
+      onError: (error) => toast.error(error.message || "Failed to update the job"),
     });
   };
-
-  if (!role || !isManager) return null;
 
   if (!Number.isFinite(jobId)) {
     return (
@@ -78,15 +84,11 @@ export default function EditJobPage() {
           onCancel={() => router.push(`/jobs/${jobId}`)}
         />
       ) : (
-        <div className="space-y-4 px-14 py-10">
-          <p className="text-sm text-slate-500">Job not found.</p>
-          <Link
-            href="/jobs"
-            className="inline-flex h-9 items-center justify-center rounded-md bg-neutral-700 px-4 text-sm font-semibold text-white hover:bg-neutral-600 transition-colors"
-          >
-            Back to Jobs
-          </Link>
-        </div>
+        <NotFoundState title="Job not found" description="It may have been deleted, or the link may be wrong.">
+          <Button size="lg" render={<Link href="/jobs" />}>
+            Back to jobs
+          </Button>
+        </NotFoundState>
       )}
     </div>
   );

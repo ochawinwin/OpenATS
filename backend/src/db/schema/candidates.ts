@@ -1,5 +1,7 @@
+import { sql, type SQL } from "drizzle-orm";
 import {
   boolean,
+  customType,
   integer,
   jsonb,
   numeric,
@@ -8,11 +10,12 @@ import {
   text,
   timestamp,
   unique,
+  uuid,
   varchar,
   index,
 } from "drizzle-orm/pg-core";
 
-import { assessmentStatus, candidateStatus, cvAnalysisStatus } from "./enums";
+import { assessmentStatus, candidateStatus, cvAnalysisStatus, cvTextStatus } from "./enums";
 import { jobs } from "./jobs";
 import { jobPipelineStages } from "./pipeline";
 import { users } from "./users";
@@ -34,7 +37,8 @@ export const candidates = pgTable(
     email: varchar("email", { length: 255 }).notNull(),
     phone: varchar("phone", { length: 50 }),
     // Cloudflare R2 URL
-    resumeUrl: varchar("resume_url", { length: 1000 }),
+    // The CV's key in the private bucket (resumes/<uuid>.pdf), not a URL. See r2.service.ts.
+    resumeKey: varchar("resume_key", { length: 1000 }),
 
     jobId: integer("job_id")
       .notNull()
@@ -49,6 +53,22 @@ export const candidates = pgTable(
 
     // Order of the card within its pipeline stage (0 is the top). Ties fall back to newest first.
     stagePosition: integer("stage_position").notNull().default(0),
+
+    // Score parts, 0-100, null until that part exists. Kept in step by scoring.service so the
+    // candidate list can sort on `totalScore` in SQL.
+    questionsScore: numeric("questions_score", { precision: 5, scale: 2 }).$type<number>(),
+    assessmentScore: numeric("assessment_score", { precision: 5, scale: 2 }).$type<number>(),
+    ratingScore: numeric("rating_score", { precision: 5, scale: 2 }).$type<number>(),
+    interviewScore: numeric("interview_score", { precision: 5, scale: 2 }).$type<number>(),
+    totalScore: numeric("total_score", { precision: 5, scale: 2 }).$type<number>(),
+    // How many of the job's weighted parts have a score yet.
+    scoredParts: integer("scored_parts").notNull().default(0),
+    // Picked a knockout answer: "does not meet requirements".
+    knockedOut: boolean("knocked_out").notNull().default(false),
+    // Result of the latest finished assessment against its pass mark; null if none finished.
+    assessmentPassed: boolean("assessment_passed"),
+    // An assessment link ran out unused. It counts as 0 and is flagged, so skipping the test cannot help.
+    assessmentExpired: boolean("assessment_expired").notNull().default(false),
 
     appliedAt: timestamp("applied_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -221,12 +241,12 @@ export const candidateCvAnalysis = pgTable(
       certs: number;
     }>(),
 
+    // Notes only. Rows saved before the score and verdict were dropped may still hold
+    // `hiringSignal` and `verdict`; they are never read or returned.
     aiSummary: jsonb("ai_summary").$type<{
       quickSummary: string;
       strengths: string[];
       gaps: string[];
-      hiringSignal: string;
-      verdict: "strong_fit" | "moderate_fit" | "weak_fit" | "not_recommended";
     }>(),
 
     extractedText: text("extracted_text"),
@@ -239,6 +259,65 @@ export const candidateCvAnalysis = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [unique().on(t.candidateId)],
+);
+
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
+
+/**
+ * The text of a candidate's CV, read from the uploaded file on our own server. One row per
+ * candidate, in its own table so the large text stays out of `candidates`.
+ */
+export const candidateCvText = pgTable(
+  "candidate_cv_text",
+  {
+    id: serial("id").primaryKey(),
+    candidateId: integer("candidate_id")
+      .notNull()
+      .references(() => candidates.id, { onDelete: "cascade" }),
+
+    // The file this text came from. A result for any other file is out of date and is not saved.
+    resumeKey: varchar("resume_key", { length: 1000 }).notNull(),
+
+    status: cvTextStatus("status").notNull().default("pending"),
+    // "text" (read from the file) or "ocr" (read from page images).
+    method: varchar("method", { length: 10 }),
+    fileType: varchar("file_type", { length: 10 }),
+
+    // Cleaned text, for people to read and for search snippets.
+    text: text("text"),
+    // The same text with terms the Postgres parser cannot keep ("C++", ".NET") rewritten. Search
+    // queries go through the same rewrite; see cv-text/normalize-search.ts.
+    searchText: text("search_text"),
+    searchVector: tsvector("search_vector").generatedAlwaysAs(
+      (): SQL => sql`to_tsvector('english', coalesce(${candidateCvText.searchText}, ''))`,
+    ),
+
+    pageCount: integer("page_count"),
+    charCount: integer("char_count"),
+
+    // Read out of `text` by rules (cv-text/profile.ts). The years and the level are estimates, and
+    // null means "could not be worked out", never zero. None of this is part of the score.
+    sections: jsonb("sections").$type<{ key: string; heading: string | null; text: string }[]>(),
+    experienceYears: numeric("experience_years", { precision: 4, scale: 1 }).$type<number>(),
+    educationLevel: varchar("education_level", { length: 20 }),
+    contacts: jsonb("contacts").$type<{ emails: string[]; phones: string[]; links: string[] }>(),
+
+    // Raised when extraction changes, so the backfill knows which rows to redo.
+    extractorVersion: integer("extractor_version").notNull().default(1),
+
+    errorMessage: text("error_message"),
+
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique().on(t.candidateId),
+    index("idx_candidate_cv_text_search").using("gin", t.searchVector),
+  ],
 );
 
 export type Candidate = typeof candidates.$inferSelect;
@@ -264,3 +343,22 @@ export type NewCandidateAssessmentAnswer =
 
 export type CandidateCvAnalysis = typeof candidateCvAnalysis.$inferSelect;
 export type NewCandidateCvAnalysis = typeof candidateCvAnalysis.$inferInsert;
+
+export type CandidateCvText = typeof candidateCvText.$inferSelect;
+export type NewCandidateCvText = typeof candidateCvText.$inferInsert;
+
+/**
+ * CVs uploaded from the careers page and not attached to an application yet. The id is what the
+ * anonymous uploader is given in place of a URL. A row is deleted when its application is sent, or
+ * with its file once it has expired; see modules/upload/resume-upload.service.ts.
+ */
+export const resumeUploads = pgTable(
+  "resume_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resumeKey: varchar("resume_key", { length: 1000 }).notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [index("resume_uploads_expires_at_idx").on(table.expiresAt)],
+);

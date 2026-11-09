@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "sonner";
 import { useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -17,7 +18,7 @@ import type { useDeleteInterview } from "@/hooks/queries/use-interviews";
 import {
   OUTCOME_CONFIG,
   STATUS_CONFIG,
-} from "@/app/(dashboard)/interviews/_components/constants";
+} from "@/app/(dashboard)/_lib/interview-display";
 import {
   eventTypeLabel,
   formatInterviewTime,
@@ -25,7 +26,7 @@ import {
   meetingProvider,
   relativeDay,
   safeMeetingUrl,
-} from "../../lib/interview-utils";
+} from "../../_lib/interview-utils";
 import { InterviewFeedbackDialog } from "./interview-feedback-dialog";
 import type { CandidateInterview } from "@/types";
 
@@ -71,7 +72,7 @@ export function InterviewCard({
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  // Fetched up front so the button can show how many notes there already are.
+  // Fetch first to show the notes count
   const { data: feedbackData } = useInterviewFeedback(interview.id);
   const feedbackCount = feedbackData?.data?.length ?? 0;
 
@@ -211,6 +212,7 @@ export function InterviewCard({
       <InterviewFeedbackDialog
         interviewId={interview.id}
         interviewName={name}
+        jobId={interview.jobId}
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
       />
@@ -228,6 +230,8 @@ export function InterviewCard({
         onClose={() => setDeleteOpen(false)}
         onConfirm={() =>
           deleteInterviewMutation.mutate(interview.id, {
+            onSuccess: () => toast.success("Interview deleted"),
+            onError: (error) => toast.error(error.message || "Failed to delete the interview"),
             onSettled: () => setDeleteOpen(false),
           })
         }

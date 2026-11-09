@@ -15,39 +15,57 @@ import {
   offers,
   candidateRejections,
   candidateInterviews,
-  company,
 } from "../../db/schema";
 import type { Candidate } from "../../db/schema/candidates";
 import { assessmentExecutionService } from "../assessment-execution/assessment-execution.service";
+import { assignmentService } from "../assignment/assignment.service";
 import { candidateActivityService } from "./candidate-activity.service";
 import { socketService } from "../../shared/services/socket.service";
+import { scoringService } from "../scoring/scoring.service";
+import { toAiSummary } from "./cv-analysis.service";
+import { cvExperienceAtLeast, cvMatches, cvRank, cvTextService } from "./cv-text.service";
+import { resumeUploadService } from "../upload/resume-upload.service";
+import { customQuestionService } from "../custom-question/custom-question.service";
+import { findAnswerProblem } from "./application-answers";
+import { requestResumeDeletion } from "../../queues/resume-delete/queue";
 import { rejectionService } from "../rejection/rejection.service";
-import { mailService } from "../../shared/services/mail.service";
+import { applicationReceivedEmail } from "../../shared/services/candidate-emails";
+import { emailContext, sendCandidateEmail } from "../../shared/services/candidate-mailer";
 import { cleanObject as clean } from "../../utils/object.utils";
 import logger from "../../utils/logger";
+import { getErrorMessage, safeErrorMessage } from "../../utils/error.utils";
+import { hasPgCode, PG_UNIQUE_VIOLATION } from "../../utils/pg-errors";
 
-/** Drizzle wraps driver errors; Postgres code 23505 is often on `cause`. */
-function isPgUniqueViolation(err: unknown): boolean {
-  let current: unknown = err;
-  const seen = new Set<unknown>();
-  for (
-    let depth = 0;
-    depth < 12 && current && typeof current === "object";
-    depth++
-  ) {
-    if (seen.has(current)) break;
-    seen.add(current);
-    const code = (current as { code?: string }).code;
-    if (code === "23505") return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
+const isPgUniqueViolation = (err: unknown) => hasPgCode(err, PG_UNIQUE_VIOLATION);
 
 export class DuplicateApplicationError extends Error {
   constructor() {
     super("DUPLICATE_APPLICATION");
     this.name = "DuplicateApplicationError";
+  }
+}
+
+/** A bulk delete matched a different number of candidates than the person confirmed. */
+export class BulkDeleteCountChangedError extends Error {
+  constructor(public readonly count: number) {
+    super(`${count} candidates match now. Check the list and confirm again.`);
+    this.name = "BulkDeleteCountChangedError";
+  }
+}
+
+/** The CV named in an application is not an upload that is still waiting to be used. */
+export class InvalidResumeUploadError extends Error {
+  constructor() {
+    super("Your CV upload has expired. Please upload it again.");
+    this.name = "InvalidResumeUploadError";
+  }
+}
+
+/** An application answer that cannot be right for its question, e.g. two picks on a single choice. */
+export class InvalidAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidAnswerError";
   }
 }
 
@@ -62,8 +80,35 @@ export interface CandidateApplyInput {
   lastName: string;
   email: string;
   phone?: string | null | undefined;
-  resumeUrl?: string | null | undefined;
+  /** The id POST /public/upload/resume gave back for the CV. */
+  resumeUploadId?: string | null | undefined;
   customAnswers?: CustomAnswerInput[] | undefined;
+}
+
+export const CANDIDATE_FLAG_FILTERS = [
+  "flagged",
+  "knocked_out",
+  "failed_assessment",
+  "assessment_expired",
+  "none",
+] as const;
+export type CandidateFlagFilter = (typeof CANDIDATE_FLAG_FILTERS)[number];
+
+/** The SQL for each flag filter, built from the flags stored on the candidate. */
+function flagCondition(flag: CandidateFlagFilter) {
+  const failed = eq(candidates.assessmentPassed, false);
+  switch (flag) {
+    case "knocked_out":
+      return eq(candidates.knockedOut, true);
+    case "failed_assessment":
+      return failed;
+    case "assessment_expired":
+      return eq(candidates.assessmentExpired, true);
+    case "flagged":
+      return or(eq(candidates.knockedOut, true), failed, eq(candidates.assessmentExpired, true));
+    case "none":
+      return sql`NOT (${candidates.knockedOut} OR coalesce(${candidates.assessmentPassed} = false, false) OR ${candidates.assessmentExpired})`;
+  }
 }
 
 export interface CandidateFilters {
@@ -76,6 +121,16 @@ export interface CandidateFilters {
     | "hired"
     | "withdrawn"
     | undefined;
+  /** "score" puts the highest total first and candidates with a knockout answer last. */
+  sort?: "score" | undefined;
+  /** Only candidates whose total score is at least this (0-100). Unscored candidates are left out. */
+  minScore?: number | undefined;
+  /** Only candidates with this flag. "none" is the ones with no flag at all. */
+  flag?: CandidateFlagFilter | undefined;
+  /** Only candidates scored on every part the job uses. */
+  fullyScored?: boolean | undefined;
+  /** Only candidates whose CV shows at least this many years of work (an estimate). */
+  minExperienceYears?: number | undefined;
   page?: number;
   limit?: number;
   teamUserId?: number;
@@ -86,7 +141,34 @@ export interface CandidateBasicUpdateInput {
   lastName?: string;
   email?: string;
   phone?: string | null;
-  resumeUrl?: string | null;
+  resumeKey?: string | null;
+}
+
+// Lists and the candidate page are told whether there is a CV, never where it is stored. The file
+// itself is only served by GET /candidates/:id/resume.
+const hasResume = sql<boolean>`${candidates.resumeKey} is not null`;
+
+function nameMatches(search: string) {
+  // "%" and "_" mean "anything" to LIKE. Typed into a search box they are ordinary characters, so
+  // a search for "_" must not match every candidate.
+  const pattern = `%${search.replace(/[\\%_]/g, "\\$&")}%`;
+  return or(
+    ilike(candidates.firstName, pattern),
+    ilike(candidates.lastName, pattern),
+    ilike(candidates.email, pattern),
+  )!;
+}
+
+/**
+ * Search results, best first: someone found by name is who was being looked for, then the CVs
+ * that match the search most closely.
+ */
+function relevanceOrder(search: string) {
+  return [
+    sql`${nameMatches(search)} desc`,
+    sql`${cvRank(search)} desc nulls last`,
+    desc(candidates.appliedAt),
+  ];
 }
 
 function buildCandidateWhere(
@@ -99,13 +181,24 @@ function buildCandidateWhere(
     conditions.push(eq(candidates.currentStageId, filters.stageId));
   if (filters.status) conditions.push(eq(candidates.status, filters.status));
   if (filters.search) {
-    conditions.push(
-      or(
-        ilike(candidates.firstName, `%${filters.search}%`),
-        ilike(candidates.lastName, `%${filters.search}%`),
-        ilike(candidates.email, `%${filters.search}%`),
-      ),
-    );
+    // By name or email, or by anything written in the CV.
+    conditions.push(or(nameMatches(filters.search), cvMatches(filters.search)));
+  }
+  if (filters.minScore !== undefined) {
+    conditions.push(sql`${candidates.totalScore} >= ${filters.minScore}`);
+  }
+  if (filters.minExperienceYears !== undefined) {
+    conditions.push(cvExperienceAtLeast(filters.minExperienceYears));
+  }
+  if (filters.flag) conditions.push(flagCondition(filters.flag));
+  if (filters.fullyScored) {
+    // Scored on every part the candidate's job weights above zero. A subquery, so it also works
+    // in the count query, which does not join the jobs table.
+    conditions.push(sql`${candidates.scoredParts} >= (
+      select (jw.score_weight_questions > 0)::int + (jw.score_weight_assessment > 0)::int
+        + (jw.score_weight_rating > 0)::int + (jw.score_weight_interview > 0)::int
+      from jobs jw where jw.id = ${candidates.jobId}
+    )`);
   }
   if (filters.teamUserId) {
     conditions.push(
@@ -119,9 +212,37 @@ function buildCandidateWhere(
   return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
+/** The stored score parts, 0-100, null until a part exists. */
+const scoreColumns = {
+  questionsScore: candidates.questionsScore,
+  assessmentScore: candidates.assessmentScore,
+  ratingScore: candidates.ratingScore,
+  interviewScore: candidates.interviewScore,
+  totalScore: candidates.totalScore,
+  scoredParts: candidates.scoredParts,
+  knockedOut: candidates.knockedOut,
+  assessmentPassed: candidates.assessmentPassed,
+  assessmentExpired: candidates.assessmentExpired,
+  /** How many parts the job weights above zero, so "2 of 4 scored" knows the 4. */
+  weightedParts: sql<number>`(
+    (${jobs.scoreWeightQuestions} > 0)::int + (${jobs.scoreWeightAssessment} > 0)::int
+    + (${jobs.scoreWeightRating} > 0)::int + (${jobs.scoreWeightInterview} > 0)::int
+  )`.as("weighted_parts"),
+};
+
+// Flagged candidates last, then whoever is furthest along the pipeline, then the highest score. A
+// half-scored candidate at the first stage should not outrank one who has been through every stage.
+const SCORE_ORDER = [
+  asc(candidates.knockedOut),
+  sql`${jobPipelineStages.position} desc nulls last`,
+  sql`${candidates.totalScore} desc nulls last`,
+  desc(candidates.appliedAt),
+];
+
 /** Returned with move-stage so the UI can toast automation outcomes. */
 export type StageAutomationFlags = {
   assessmentInvite?: "sent" | "skipped_active_invite";
+  assignmentInvite?: "sent" | "skipped_active_invite" | "failed";
 };
 
 /**
@@ -197,6 +318,9 @@ export type BulkMoveResult = {
   failed: { id: number; error: string }[];
   assessmentInvitesSent: number;
   assessmentInvitesSkipped: number;
+  assignmentInvitesSent: number;
+  assignmentInvitesSkipped: number;
+  assignmentInvitesFailed: number;
 };
 
 export type MoveStageResult = {
@@ -217,22 +341,17 @@ async function sendApplicationConfirmationEmail(
 
     if (!job) return;
 
-    const [comp] = await db.select().from(company).limit(1);
-    const companyName = comp?.name ?? "Talent Acquisition Team";
-
-    const candidateName = `${candidate.firstName} ${candidate.lastName}`;
-    const subject = `${job.title} - Thank you for your application`;
-    const html = `
-      <div style="font-family:sans-serif;line-height:1.8;color:#333;max-width:600px">
-        <p>Dear ${candidateName},</p>
-        <p>We have successfully received your application and will review it carefully.</p>
-        <p>If your qualifications align with our requirements, we'll be in touch regarding the next steps. We appreciate your interest in joining our team.</p>
-        <br>
-        <p>Regards,<br>${companyName} Talent Acquisition Team</p>
-      </div>
-    `;
-
-    await mailService.sendEmail({ to: candidate.email, subject, html });
+    const email = applicationReceivedEmail({
+      ...(await emailContext("application_received")),
+      candidateName: `${candidate.firstName} ${candidate.lastName}`,
+      jobTitle: job.title,
+    });
+    await sendCandidateEmail({
+      candidateId: candidate.id,
+      to: candidate.email,
+      kind: "application_received",
+      ...email,
+    });
   } catch (err) {
     logger.error("Failed to send application confirmation email:", err);
   }
@@ -240,9 +359,17 @@ async function sendApplicationConfirmationEmail(
 
 export const candidateService = {
   async apply(jobId: number, input: CandidateApplyInput) {
-    const { customAnswers, ...rest } = input;
+    const { customAnswers, resumeUploadId, ...rest } = input;
     const normalizedEmail = rest.email.trim().toLowerCase();
     const candidateData = { ...rest, email: normalizedEmail };
+
+    // Before anything is saved: every question that has to be answered is, and every answer and
+    // option belongs to this job. See application-answers.ts.
+    const problem = findAnswerProblem(
+      await customQuestionService.getByJobId(jobId),
+      customAnswers ?? [],
+    );
+    if (problem) throw new InvalidAnswerError(problem);
 
     try {
       return await db.transaction(async (tx) => {
@@ -257,11 +384,19 @@ export const candidateService = {
           throw new Error("No pipeline stages defined for this job");
         }
 
+        // The applicant never names a file, only their own upload. An id that is unknown, expired
+        // or already used on another application gives no file.
+        const resumeKey = resumeUploadId
+          ? await resumeUploadService.claim(resumeUploadId, tx)
+          : undefined;
+        if (resumeKey === null) throw new InvalidResumeUploadError();
+
         const [candidate] = await tx
           .insert(candidates)
           .values(
             clean({
               ...candidateData,
+              resumeKey,
               jobId,
               currentStageId: firstStage.id,
             }),
@@ -279,19 +414,11 @@ export const candidateService = {
 
         if (customAnswers && customAnswers.length > 0) {
           for (const answer of customAnswers) {
-            const [question] = await tx
-              .select()
-              .from(jobCustomQuestions)
-              .where(
-                and(
-                  eq(jobCustomQuestions.id, answer.questionId),
-                  eq(jobCustomQuestions.jobId, jobId),
-                ),
-              );
+            // Left blank, which is allowed for a question that does not have to be answered.
+            const hasText = Boolean(answer.answerText?.trim());
+            if (!hasText && (answer.optionIds?.length ?? 0) === 0) continue;
 
-            if (!question) continue;
-
-            if (answer.answerText !== undefined) {
+            if (hasText) {
               await tx.insert(candidateCustomAnswers).values({
                 candidateId: candidate.id,
                 questionId: answer.questionId,
@@ -311,7 +438,8 @@ export const candidateService = {
           }
         }
 
-        return candidate;
+        // Questions score and knockout flag, from the options they picked.
+        return (await scoringService.recompute(candidate.id, tx)) ?? candidate;
       }).then((candidate) => {
         socketService.notifyCandidateApplied(jobId);
         void sendApplicationConfirmationEmail(candidate, jobId);
@@ -339,7 +467,7 @@ export const candidateService = {
           lastName: candidates.lastName,
           email: candidates.email,
           phone: candidates.phone,
-          resumeUrl: candidates.resumeUrl,
+          hasResume: hasResume,
           jobId: candidates.jobId,
           currentStageId: candidates.currentStageId,
           status: candidates.status,
@@ -347,6 +475,7 @@ export const candidateService = {
           updatedAt: candidates.updatedAt,
           stageName: jobPipelineStages.name,
           jobTitle: jobs.title,
+          ...scoreColumns,
         })
         .from(candidates)
         .leftJoin(
@@ -355,7 +484,13 @@ export const candidateService = {
         )
         .leftJoin(jobs, eq(candidates.jobId, jobs.id))
         .where(where)
-        .orderBy(desc(candidates.appliedAt))
+        .orderBy(
+          ...(rest.sort === "score"
+            ? SCORE_ORDER
+            : rest.search
+              ? relevanceOrder(rest.search)
+              : [desc(candidates.appliedAt)]),
+        )
         .limit(limit)
         .offset(offset),
 
@@ -365,8 +500,15 @@ export const candidateService = {
         .where(where),
     ]);
 
+    // Where in the CV the search was found, for the rows on this page only.
+    const snippets = rest.search
+      ? await cvTextService.snippets(rows.map((row) => row.id), rest.search)
+      : null;
+
     return {
-      rows,
+      rows: snippets
+        ? rows.map((row) => ({ ...row, cvSnippet: snippets.get(row.id) ?? null }))
+        : rows,
       total: countRow?.count ?? 0,
       page,
       limit,
@@ -390,6 +532,12 @@ export const candidateService = {
         status: candidates.status,
         appliedAt: candidates.appliedAt,
         updatedAt: candidates.updatedAt,
+        totalScore: candidates.totalScore,
+        scoredParts: candidates.scoredParts,
+        weightedParts: scoreColumns.weightedParts,
+        knockedOut: candidates.knockedOut,
+        assessmentPassed: candidates.assessmentPassed,
+        assessmentExpired: candidates.assessmentExpired,
         // When the candidate entered their current stage, for "time in stage".
         stageEnteredAt: sql<string | null>`(
           select max(${candidateStageHistory.movedAt})
@@ -399,6 +547,7 @@ export const candidateService = {
         )`.as("stage_entered_at"),
       })
       .from(candidates)
+      .innerJoin(jobs, eq(candidates.jobId, jobs.id))
       .where(and(eq(candidates.jobId, jobId), ne(candidates.status, "rejected")))
       .orderBy(asc(candidates.stagePosition), desc(candidates.appliedAt))
       .limit(BOARD_MAX_CANDIDATES);
@@ -413,7 +562,7 @@ export const candidateService = {
         lastName: candidates.lastName,
         email: candidates.email,
         phone: candidates.phone,
-        resumeUrl: candidates.resumeUrl,
+        hasResume: hasResume,
         jobId: candidates.jobId,
         currentStageId: candidates.currentStageId,
         status: candidates.status,
@@ -421,6 +570,13 @@ export const candidateService = {
         updatedAt: candidates.updatedAt,
         stageName: jobPipelineStages.name,
         jobTitle: jobs.title,
+        ...scoreColumns,
+        weights: {
+          questions: jobs.scoreWeightQuestions,
+          assessment: jobs.scoreWeightAssessment,
+          rating: jobs.scoreWeightRating,
+          interview: jobs.scoreWeightInterview,
+        },
       })
       .from(candidates)
       .leftJoin(
@@ -501,15 +657,14 @@ export const candidateService = {
       .from(candidateCvAnalysis)
       .where(eq(candidateCvAnalysis.candidateId, id));
 
+    // Notes only: the summary, strengths and gaps, and which required skills the CV shows. Rows
+    // analysed before the score and verdict were removed still hold them; they are not returned.
     const cvAnalysis = cvRow
       ? {
           status: cvRow.status,
-          matchScore:
-            cvRow.matchScore != null ? Number(cvRow.matchScore) : null,
           matchedSkills: cvRow.matchedSkills,
           missingSkills: cvRow.missingSkills,
-          scoreBreakdown: cvRow.scoreBreakdown,
-          aiSummary: cvRow.aiSummary ?? null,
+          aiSummary: toAiSummary(cvRow.aiSummary),
           errorMessage: cvRow.errorMessage,
           updatedAt: cvRow.updatedAt,
         }
@@ -538,7 +693,6 @@ export const candidateService = {
         bodyText: candidateInterviews.bodyText,
         timeSlots: candidateInterviews.timeSlots,
         publicToken: candidateInterviews.publicToken,
-        googleEventId: candidateInterviews.googleEventId,
         createdBy: candidateInterviews.createdBy,
         createdAt: candidateInterviews.createdAt,
         updatedAt: candidateInterviews.updatedAt,
@@ -553,9 +707,14 @@ export const candidateService = {
       .orderBy(desc(candidateInterviews.createdAt));
 
     const activities = await candidateActivityService.getByCandidate(id);
+    const ratings = await scoringService.getRatings(id);
+    const interviewSpread = await scoringService.getInterviewSpread(id);
 
     return {
       ...candidate,
+      cvText: await cvTextService.getForCandidate(id),
+      ratings,
+      interviewSpread,
       answers,
       selections,
       history,
@@ -573,7 +732,10 @@ export const candidateService = {
     movedBy: number | null = null,
     position?: number,
   ): Promise<MoveStageResult> {
-    return await db.transaction(async (tx) => {
+    // Sent after the move is saved, because an email must never go out from inside a transaction.
+    let assignmentToSend: number | null = null;
+
+    const moved = await db.transaction(async (tx) => {
       const stageAutomation: StageAutomationFlags = {};
 
       const [candidate] = await tx
@@ -695,8 +857,21 @@ export const candidateService = {
           : "skipped_active_invite";
       }
 
+      assignmentToSend = await assignmentService.getForStage(candidate.jobId, newStageId);
+
       return { candidate: updated, stageAutomation };
     });
+
+    if (assignmentToSend !== null) {
+      try {
+        const sent = await assignmentService.send(candidateId, assignmentToSend);
+        moved.stageAutomation.assignmentInvite = sent?.didSendInvite ? "sent" : "skipped_active_invite";
+      } catch (error) {
+        logger.error(`Stage assignment for candidate ${candidateId} failed: ${error instanceof Error ? error.message : String(error)}`);
+        moved.stageAutomation.assignmentInvite = "failed";
+      }
+    }
+    return moved;
   },
 
   /**
@@ -714,6 +889,9 @@ export const candidateService = {
       failed: [],
       assessmentInvitesSent: 0,
       assessmentInvitesSkipped: 0,
+      assignmentInvitesSent: 0,
+      assignmentInvitesSkipped: 0,
+      assignmentInvitesFailed: 0,
     };
     // Last first, so each one is placed at the top and the first id ends up on top.
     for (const id of [...candidateIds].reverse()) {
@@ -724,11 +902,12 @@ export const candidateService = {
         if (res.stageAutomation.assessmentInvite === "skipped_active_invite") {
           result.assessmentInvitesSkipped += 1;
         }
+        if (res.stageAutomation.assignmentInvite === "sent") result.assignmentInvitesSent += 1;
+        if (res.stageAutomation.assignmentInvite === "skipped_active_invite") result.assignmentInvitesSkipped += 1;
+        if (res.stageAutomation.assignmentInvite === "failed") result.assignmentInvitesFailed += 1;
       } catch (error) {
-        result.failed.push({
-          id,
-          error: error instanceof Error ? error.message : "Failed to move candidate",
-        });
+        logger.error(`Bulk stage move failed for candidate ${id}: ${getErrorMessage(error)}`);
+        result.failed.push({ id, error: safeErrorMessage(error, "Failed to move candidate") });
       }
     }
     result.moved.reverse();
@@ -744,24 +923,28 @@ export const candidateService = {
     },
     rejectedBy: number | null = null,
   ) {
-    const [candidate] = await db
-      .select()
-      .from(candidates)
-      .where(eq(candidates.id, candidateId));
-
-    if (!candidate) throw new Error("Candidate not found");
-
     return rejectionService.reject(
       {
         candidateId,
-        jobId: candidate.jobId,
-        fromStageId: candidate.currentStageId,
         reason: input.reason ?? null,
         templateId: input.templateId ?? null,
         emailStatus: input.emailStatus,
       },
       rejectedBy,
     );
+  },
+
+  /** Where the CV is stored. Kept out of every other result, which only say whether there is one. */
+  async getResumeFile(id: number) {
+    const [candidate] = await db
+      .select({
+        resumeKey: candidates.resumeKey,
+        firstName: candidates.firstName,
+        lastName: candidates.lastName,
+      })
+      .from(candidates)
+      .where(eq(candidates.id, id));
+    return candidate?.resumeKey ? { ...candidate, resumeKey: candidate.resumeKey } : null;
   },
 
   async updateBasicDetails(id: number, data: CandidateBasicUpdateInput) {
@@ -781,7 +964,7 @@ export const candidateService = {
           lastName: data.lastName,
           email: data.email,
           phone: data.phone,
-          resumeUrl: data.resumeUrl,
+          resumeKey: data.resumeKey,
           updatedAt: new Date(),
         }),
       )
@@ -791,27 +974,58 @@ export const candidateService = {
     return updated ?? null;
   },
 
+  /**
+   * Deletes the candidate and everything recorded about them (every table that names a candidate
+   * cascades), then has their CV file erased from storage.
+   */
   async delete(id: number) {
     const [deleted] = await db
       .delete(candidates)
       .where(eq(candidates.id, id))
-      .returning();
-    return deleted ?? null;
+      .returning({ id: candidates.id, jobId: candidates.jobId, resumeKey: candidates.resumeKey });
+    if (!deleted) return null;
+
+    await requestResumeDeletion([deleted.resumeKey]);
+    return { id: deleted.id, jobId: deleted.jobId };
   },
 
-  async deleteManyByFilters(
-    jobId: number | undefined,
-    filters: Omit<CandidateFilters, "page" | "limit"> = {},
-  ) {
-    const where = buildCandidateWhere(jobId, filters);
-    const deleted = await db.delete(candidates).where(where).returning({
+  /** Deletes the candidates that were picked one by one. Ids that no longer exist are skipped. */
+  async deleteByIds(ids: number[]) {
+    if (ids.length === 0) return [];
+    const deleted = await db.delete(candidates).where(inArray(candidates.id, ids)).returning({
       id: candidates.id,
-      email: candidates.email,
       jobId: candidates.jobId,
+      resumeKey: candidates.resumeKey,
     });
 
-    return deleted;
+    await requestResumeDeletion(deleted.map((candidate) => candidate.resumeKey));
+    return deleted.map(({ id, jobId }) => ({ id, jobId }));
+  },
+
+  /**
+   * Deletes every candidate of one job that matches the filters: the "select all matching" of the
+   * candidate list. Always one job, never the whole installation. `expectedCount` is the number
+   * the person was shown and confirmed; if a different number matches now (someone applied, or
+   * the search also matches CVs they did not see), nothing is deleted and they are asked again.
+   */
+  async deleteManyByFilters(
+    jobId: number,
+    filters: Omit<CandidateFilters, "page" | "limit">,
+    expectedCount: number,
+  ) {
+    const where = buildCandidateWhere(jobId, filters);
+    const deleted = await db.transaction(async (tx) => {
+      const rows = await tx.delete(candidates).where(where).returning({
+        id: candidates.id,
+        jobId: candidates.jobId,
+        resumeKey: candidates.resumeKey,
+      });
+      // Thrown inside the transaction, so the delete is undone.
+      if (rows.length !== expectedCount) throw new BulkDeleteCountChangedError(rows.length);
+      return rows;
+    });
+
+    await requestResumeDeletion(deleted.map((candidate) => candidate.resumeKey));
+    return deleted.map(({ id, jobId: deletedJobId }) => ({ id, jobId: deletedJobId }));
   },
 };
-
-//TODO: implement kafka

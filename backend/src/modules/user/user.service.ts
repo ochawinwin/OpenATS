@@ -1,4 +1,4 @@
-import { eq, or } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { users } from "../../db/schema";
 import { cleanObject as clean } from "../../utils/object.utils";
@@ -8,13 +8,6 @@ export interface UpdateUserInput {
   lastName?: string | undefined;
   avatarUrl?: string | null | undefined;
   isActive?: boolean | undefined;
-}
-
-export interface CreateUserInput {
-  asgardeoUserId: string;
-  firstName: string;
-  lastName: string;
-  email: string;
 }
 
 export const userService = {
@@ -31,51 +24,21 @@ export const userService = {
     return user ?? null;
   },
 
-  async getByAsgardeoId(asgardeoUserId: string) {
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.asgardeoUserId, asgardeoUserId));
-    return user ?? null;
-  },
+  async update(id: number, input: UpdateUserInput) {
+    const updateData: Partial<typeof users.$inferInsert> = { ...clean(input), updatedAt: new Date() };
 
-  async create(input: CreateUserInput) {
-    // Reactivate soft-deleted row on re-creation rather than inserting a duplicate.
-    const [existing] = await db
-      .select()
-      .from(users)
-      .where(
-        or(
-          eq(users.email, input.email),
-          eq(users.asgardeoUserId, input.asgardeoUserId),
-        ),
-      )
-      .limit(1);
-
-    if (existing) {
-      const [reactivated] = await db
-        .update(users)
-        .set({
-          asgardeoUserId: input.asgardeoUserId,
-          firstName: input.firstName,
-          lastName: input.lastName,
-          email: input.email,
-          isActive: true,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, existing.id))
-        .returning();
-      return reactivated;
+    if (input.firstName !== undefined || input.lastName !== undefined) {
+      const user = await this.getById(id);
+      if (user) {
+        const firstName = input.firstName ?? user.firstName;
+        const lastName = input.lastName ?? user.lastName;
+        updateData.name = `${firstName} ${lastName}`.trim();
+      }
     }
 
-    const [created] = await db.insert(users).values(input).returning();
-    return created;
-  },
-
-  async update(id: number, input: UpdateUserInput) {
     const [updated] = await db
       .update(users)
-      .set({ ...clean(input), updatedAt: new Date() })
+      .set(updateData)
       .where(eq(users.id, id))
       .returning();
     return updated ?? null;

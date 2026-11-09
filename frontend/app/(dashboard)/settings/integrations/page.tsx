@@ -1,11 +1,11 @@
 import { Suspense } from "react";
-import { serverFetch } from "@/lib/auth-action";
+import { serverFetch } from "@/lib/server-fetch";
 import type { IntegrationStatus } from "@/hooks/queries/use-integrations";
 import { IntegrationsList } from "./_components/integrations-list";
 import { OAuthCallbackToast } from "./_components/oauth-callback-toast";
 
 export default async function SettingsIntegrationsPage() {
-  // A failed load is shown by the list, with a retry, instead of crashing the page.
+  // The list handles load errors
   let initialStatus: IntegrationStatus[] | null = null;
   try {
     initialStatus = (await serverFetch<{ data: IntegrationStatus[] }>("/integrations/status")).data;
@@ -26,13 +26,15 @@ export default async function SettingsIntegrationsPage() {
               Integrations
             </h1>
             <p className="mt-2 text-sm text-slate-500 dark:text-neutral-400">
-              Connect your own accounts so interviews get a meeting link automatically.
+              Connect your own accounts so your interviews go in your calendar, with a meeting link.
             </p>
           </header>
 
           <p className="rounded-lg border border-slate-300 bg-white px-5 py-4 text-sm leading-relaxed text-slate-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
-            These connections are personal. Everyone who runs interviews connects their own account,
-            and a meeting link is created on the account of the interviewer chosen for that interview.
+            These connections are personal. Everyone who runs interviews connects their own account.
+            When an interview gets its time, it is added to the calendar of the interviewer chosen
+            for it, and the candidate is invited. An interviewer who has not connected an account
+            gets no calendar entry. The candidate is still emailed the details.
           </p>
 
           <IntegrationsList initialStatus={initialStatus} />

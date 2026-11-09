@@ -20,11 +20,15 @@ type ConfirmDeleteDialogProps = {
   title: string;
   description: React.ReactNode;
   isPending?: boolean;
-  /** Button label, e.g. "Delete" or "Remove". The pending label is derived from it. */
+  /** Button label, e.g. "Delete" */
   confirmLabel?: string;
   pendingLabel?: string;
-  /** Overrides the confirm button colors, for non-delete actions such as publishing. */
+  /** Custom confirm button colours */
   confirmClassName?: string;
+  /** Extra content under the description */
+  children?: React.ReactNode;
+  /** Disable confirm until ready */
+  confirmDisabled?: boolean;
   onClose: () => void;
   onConfirm: () => void;
 };
@@ -38,7 +42,7 @@ export function ConfirmDeleteName({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** The one delete confirmation used across the app, so every page looks and behaves the same. */
+/** Shared delete confirm dialog */
 export function ConfirmDeleteDialog({
   open,
   title,
@@ -47,6 +51,8 @@ export function ConfirmDeleteDialog({
   confirmLabel = "Delete",
   pendingLabel,
   confirmClassName,
+  children,
+  confirmDisabled = false,
   onClose,
   onConfirm,
 }: ConfirmDeleteDialogProps) {
@@ -61,6 +67,7 @@ export function ConfirmDeleteDialog({
             {description}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {children}
         <AlertDialogFooter className="gap-2">
           <AlertDialogCancel
             disabled={isPending}
@@ -73,7 +80,7 @@ export function ConfirmDeleteDialog({
               e.preventDefault();
               onConfirm();
             }}
-            disabled={isPending}
+            disabled={isPending || confirmDisabled}
             className={cn(
               "inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border-none bg-red-600 px-4 text-sm font-medium leading-none text-white shadow-none hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-70",
               confirmClassName,

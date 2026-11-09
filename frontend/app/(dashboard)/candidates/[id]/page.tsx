@@ -1,10 +1,10 @@
 "use client";
 
+import { toast } from "sonner";
 import { useMemo, useState, use } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowLeft02Icon, QuestionIcon } from "@hugeicons/core-free-icons";
+import { NotFoundState } from "@/components/not-found-state";
 
 import { Button } from "@/components/ui/button";
 
@@ -12,7 +12,6 @@ import {
   useCandidate,
   useDeleteCandidate,
   useMoveCandidateStage,
-  useUpdateCandidateBasicDetails,
 } from "@/hooks/queries/use-candidates";
 import { usePipeline } from "@/hooks/queries/use-pipeline";
 import { useCandidateAssessments } from "@/hooks/queries/use-assessments";
@@ -22,20 +21,24 @@ import {
 } from "@/hooks/queries/use-candidates";
 import { useDeleteInterview } from "@/hooks/queries/use-interviews";
 import { useTemplates } from "@/hooks/queries/use-templates";
-import { InterviewSchedulerDialog } from "@/app/(dashboard)/interviews/_components/interview-scheduler-dialog";
+import { InterviewSchedulerDialog } from "@/app/(dashboard)/_components/interview-scheduler-dialog";
 
-import { type SectionId, OFFER_STATUS_STYLES } from "./_components/constants";
+import { type SectionId, OFFER_STATUS_STYLES, SECTIONS } from "./_components/constants";
+import { useAiSettings, useWorkerStatus } from "@/hooks/queries/use-settings";
 import { CandidateHeader } from "./_components/candidate-header";
 import { SectionTabs } from "./_components/section-tabs";
 import { CvSheet } from "./_components/cv-sheet";
 import { AssessmentSheet } from "./_components/assessment-sheet";
-import { JobFitSection } from "./_components/sections/job-fit-section";
+import { AiAnalysisSection } from "./_components/sections/ai-analysis-section";
 import { AnswersSection } from "./_components/sections/answer-section";
+import { CvTextSection } from "./_components/sections/cv-text-section";
 import { HistorySection } from "./_components/sections/history-section";
 import { OfferSection } from "./_components/sections/offer-section";
 import { InterviewsSection } from "./_components/sections/interviews-section";
 import { RejectionSection } from "./_components/sections/rejection-section";
 import { EmailSection } from "./_components/sections/email-section";
+import { ScoreBreakdown } from "./_components/score-breakdown";
+import { AssignmentsSection } from "./_components/sections/assignments-section";
 import { ScoresSection } from "./_components/sections/scores-section";
 import { CandidateEditDialog } from "../_components/candidate-edit-dialog";
 import { CandidateDeleteDialog } from "../_components/candidate-delete-dialog";
@@ -52,6 +55,8 @@ export default function CandidateDetailPage({
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const fromParam = searchParams.get("from");
+  // Keep the list filters so Back returns to the same list
+  const backParam = new URLSearchParams(searchParams.get("back") ?? "").toString();
   const unwrappedParams = use(params);
   const candidateId = parseInt(unwrappedParams.id, 10);
 
@@ -72,16 +77,33 @@ export default function CandidateDetailPage({
   );
 
   const deleteMutation = useDeleteCandidate();
-  const updateMutation = useUpdateCandidateBasicDetails();
 
-  const [activeSection, setActiveSection] = useState<SectionId>("job-fit");
+  // AI tab only shows when AI analysis is on
+  const { data: aiSettingsData, isLoading: aiSettingsLoading } = useAiSettings();
+  // Only check the worker while the CV is waiting
+  const cvWaiting =
+    !!candidateData?.data.hasResume &&
+    (!candidateData.data.cvText || candidateData.data.cvText.status === "pending");
+  const { data: workerStatus } = useWorkerStatus({ enabled: cvWaiting });
+  const aiActive = aiSettingsData?.data?.active ?? false;
+  // Offers are for managers only, so interviewers do not get the tab
+  const sections = useMemo(
+    () =>
+      SECTIONS.filter(
+        (section) => (section.id !== "ai-analysis" || aiActive) && (section.id !== "offer" || isManager),
+      ),
+    [aiActive, isManager],
+  );
+  // ?section= opens a tab directly, e.g. the interviews from the overview
+  const [pickedSection, setActiveSection] = useState<SectionId | null>(
+    () => searchParams.get("section") as SectionId | null,
+  );
+  const activeSection =
+    pickedSection && sections.some((section) => section.id === pickedSection)
+      ? pickedSection
+      : sections[0]!.id;
   const [deleteTarget, setDeleteTarget] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [editFirstName, setEditFirstName] = useState("");
-  const [editLastName, setEditLastName] = useState("");
-  const [editEmail, setEditEmail] = useState("");
-  const [editPhone, setEditPhone] = useState("");
-  const [editResumeFile, setEditResumeFile] = useState<File | null>(null);
 
   const [selectedStageId, setSelectedStageId] = useState("");
   const [isCvExpanded, setIsCvExpanded] = useState(false);
@@ -115,46 +137,31 @@ export default function CandidateDetailPage({
 
   const openEditDialog = () => {
     if (!candidate) return;
-    setEditFirstName(candidate.firstName);
-    setEditLastName(candidate.lastName);
-    setEditEmail(candidate.email);
-    setEditPhone(candidate.phone ?? "");
-    setEditResumeFile(null);
     setEditOpen(true);
   };
 
   const confirmDelete = () => {
     if (!candidate) return;
     deleteMutation.mutate(candidate.id, {
-      onSuccess: () => router.push("/candidates"),
-    });
-  };
-
-  const confirmUpdate = () => {
-    if (!candidate) return;
-    const formData = new FormData();
-    formData.append("firstName", editFirstName.trim());
-    formData.append("lastName", editLastName.trim());
-    formData.append("email", editEmail.trim());
-    formData.append("phone", editPhone.trim());
-    if (editResumeFile) formData.append("resume", editResumeFile);
-
-    updateMutation.mutate(
-      { id: candidate.id, formData },
-      {
-        onSuccess: () => {
-          setEditOpen(false);
-          setEditResumeFile(null);
-        },
+      onSuccess: () => {
+        toast.success("Candidate deleted");
+        router.push("/candidates");
       },
-    );
+      onError: (error) => toast.error(error.message || "Failed to delete the candidate"),
+    });
   };
 
   const saveStageChange = () => {
     if (!candidate || !effectiveSelectedStageId || !hasStageChange) return;
     moveStageMutation.mutate(
       { id: candidate.id, newStageId: Number(effectiveSelectedStageId) },
-      { onSuccess: () => setSelectedStageId("") },
+      {
+        onSuccess: () => {
+          toast.success("Stage updated");
+          setSelectedStageId("");
+        },
+        onError: (error) => toast.error(error.message || "Failed to move the candidate"),
+      },
     );
   };
 
@@ -164,11 +171,14 @@ export default function CandidateDetailPage({
         ? "/interviews"
         : fromParam === "pipeline" && isManager
           ? `/jobs/${candidate?.jobId}/pipeline`
-          : "/candidates";
+          : fromParam === "candidates" && backParam
+            ? `/candidates?${backParam}`
+            : "/candidates";
     router.push(back);
   };
 
-  if (isLoading) {
+  // Wait for the setting so the tabs don't jump
+  if (isLoading || aiSettingsLoading) {
     return (
       <div className="flex flex-1 items-center justify-center bg-slate-50/50 dark:bg-neutral-950">
         <div className="flex flex-col items-center gap-3">
@@ -183,25 +193,11 @@ export default function CandidateDetailPage({
 
   if (!candidate) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-slate-50/50 dark:bg-neutral-950">
-        <div className="size-14 rounded-full bg-slate-100 dark:bg-neutral-800 flex items-center justify-center">
-          <HugeiconsIcon
-            icon={QuestionIcon}
-            className="size-6 text-slate-400 dark:text-neutral-500"
-          />
-        </div>
-        <p className="text-slate-500 dark:text-neutral-400 font-semibold text-sm">
-          Candidate not found
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => router.push("/candidates")}
-          className="h-7 px-2.5 rounded-md border-slate-200 dark:border-neutral-700 text-slate-600 dark:text-neutral-400 font-medium"
-        >
-          <HugeiconsIcon icon={ArrowLeft02Icon} className="size-4 mr-2" />
-          Back to Candidates
+      <NotFoundState title="Candidate not found" description="They may have been deleted, or the link may be wrong.">
+        <Button size="lg" onClick={() => router.push("/candidates")}>
+          Back to candidates
         </Button>
-      </div>
+      </NotFoundState>
     );
   }
 
@@ -222,6 +218,7 @@ export default function CandidateDetailPage({
         onCancelStageChange={() => setSelectedStageId("")}
         onSaveStageChange={saveStageChange}
         onViewCv={() => setIsCvExpanded(true)}
+        onViewScores={() => setActiveSection("scores")}
         onClose={handleClose}
         onEdit={openEditDialog}
         onDelete={() => setDeleteTarget(true)}
@@ -231,6 +228,7 @@ export default function CandidateDetailPage({
         <div className="px-4 py-5 sm:px-6">
           <main className="min-w-0">
             <SectionTabs
+              sections={sections}
               activeSection={activeSection}
               onSectionChange={setActiveSection}
               cvAnalysis={cvAnalysis}
@@ -243,14 +241,21 @@ export default function CandidateDetailPage({
             />
 
             <div className="rounded-md border border-slate-300 bg-white shadow-none dark:border-neutral-700 dark:bg-neutral-950">
-              {activeSection === "job-fit" && (
-                <JobFitSection
-                  resumeUrl={candidate.resumeUrl}
+              {activeSection === "ai-analysis" && (
+                <AiAnalysisSection
+                  hasResume={candidate.hasResume}
                   cvAnalysis={cvAnalysis}
                 />
               )}
               {activeSection === "answers" && (
                 <AnswersSection candidate={candidate} />
+              )}
+              {activeSection === "cv-text" && (
+                <CvTextSection
+                  cvText={candidate.cvText ?? null}
+                  hasResume={candidate.hasResume}
+                  workerMissing={workerStatus?.data.status === "missing"}
+                />
               )}
               {activeSection === "history" && (
                 <HistorySection candidate={candidate} stageMap={stageMap} />
@@ -286,11 +291,17 @@ export default function CandidateDetailPage({
               {activeSection === "email" && (
                 <EmailSection candidate={candidate} />
               )}
+              {activeSection === "assignments" && (
+                <AssignmentsSection candidateId={candidateId} />
+              )}
               {activeSection === "scores" && (
-                <ScoresSection
-                  assessmentsData={assessmentsData}
-                  onViewAttempt={setViewAttemptId}
-                />
+                <>
+                  <ScoreBreakdown candidate={candidate} />
+                  <ScoresSection
+                    assessmentsData={assessmentsData}
+                    onViewAttempt={setViewAttemptId}
+                  />
+                </>
               )}
             </div>
           </main>
@@ -304,25 +315,8 @@ export default function CandidateDetailPage({
       />
 
       <CandidateEditDialog
-        isOpen={editOpen}
+        candidate={editOpen ? (candidate ?? null) : null}
         onClose={() => setEditOpen(false)}
-        candidate={candidate}
-        formData={{
-          firstName: editFirstName,
-          lastName: editLastName,
-          email: editEmail,
-          phone: editPhone,
-          resumeFile: editResumeFile,
-        }}
-        onFormChange={(formData) => {
-          setEditFirstName(formData.firstName);
-          setEditLastName(formData.lastName);
-          setEditEmail(formData.email);
-          setEditPhone(formData.phone);
-          setEditResumeFile(formData.resumeFile);
-        }}
-        onConfirm={confirmUpdate}
-        isPending={updateMutation.isPending}
       />
 
       <CandidateDeleteDialog

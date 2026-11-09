@@ -2,16 +2,30 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import {
   candidateService,
+  BulkDeleteCountChangedError,
   DuplicateApplicationError,
+  InvalidAnswerError,
+  InvalidResumeUploadError,
+  CANDIDATE_FLAG_FILTERS,
+  type CandidateFlagFilter,
 } from "./candidate.service";
 import { jobService } from "../job/job.service";
 import { r2Service } from "../../shared/services/r2.service";
+import { resumeContentDisposition } from "./resume-filename";
 import { socketService } from "../../shared/services/socket.service";
-import { canAccessCandidate } from "../../shared/auth/job-access";
+import { parseMinScore, parseMinYears } from "./candidate-query";
+import { aiSettingsService } from "../settings/ai-settings.service";
+import { scoringService } from "../scoring/scoring.service";
+import { withholdInterviewScores } from "../scoring/scoring";
+import { canViewCandidate, canViewCandidates, canViewJob, teamScope } from "../../shared/auth/job-access";
 import logger from "../../utils/logger";
 
 import { requestCvAnalysis } from "../../queues/cv-analysis/queue";
-import { getErrorMessage} from "../../utils/error.utils";
+import { requestCvExtraction } from "../../queues/cv-extract/queue";
+import { notificationService } from "../../shared/services/notification.service";
+import { requestResumeDeletion } from "../../queues/resume-delete/queue";
+import { cvTextService } from "./cv-text.service";
+import { getErrorMessage, safeErrorMessage } from "../../utils/error.utils";
 
 const customAnswerSchema = z.object({
   questionId: z.number().int().positive(),
@@ -24,12 +38,8 @@ const candidateApplySchema = z.object({
   lastName: z.string().min(1, "Last name is required").max(100),
   email: z.string().email("Invalid email address").max(255),
   phone: z.string().max(50).optional().nullable(),
-  resumeUrl: z
-    .string()
-    .url("Invalid resume URL")
-    .max(1000)
-    .optional()
-    .nullable(),
+  // The id POST /public/upload/resume gave back for the uploaded file. Never a URL or a key.
+  resumeUploadId: z.string().uuid("Upload the CV again").optional().nullable(),
   customAnswers: z.array(customAnswerSchema).optional(),
 });
 
@@ -55,14 +65,44 @@ const updateCandidateBasicSchema = z.object({
   phone: z.union([z.string().max(50), z.null()]).optional(),
 });
 
-const bulkDeleteCandidatesSchema = z.object({
-  jobId: z.number().int().positive().optional(),
-  stageId: z.number().int().positive().optional(),
-  search: z.string().trim().optional(),
-  status: z
-    .enum(["active", "rejected", "offered", "hired", "withdrawn"])
-    .optional(),
-});
+// A bulk delete has to say exactly what it deletes: either the candidates picked one by one, or
+// everyone matching the list's filters in ONE job together with the number the person confirmed.
+// There is no form that reaches across jobs, and an empty body is not "everything".
+const bulkDeleteCandidatesSchema = z.union([
+  z
+    .object({
+      candidateIds: z
+        .array(z.number().int().positive())
+        .min(1, "Pick at least one candidate")
+        .max(200, "Delete at most 200 candidates at a time")
+        .refine((ids) => new Set(ids).size === ids.length, "Candidate ids must be unique"),
+    })
+    .strict(),
+  z
+    .object({
+      jobId: z.number().int().positive("A job is required"),
+      stageId: z.number().int().positive().optional(),
+      search: z.string().trim().optional(),
+      status: z
+        .enum(["active", "rejected", "offered", "hired", "withdrawn"])
+        .optional(),
+      expectedCount: z.number().int().positive("Confirm how many candidates will be deleted"),
+    })
+    .strict(),
+]);
+
+/**
+ * Anyone interviewing a candidate, whatever their role, sees no Interview part or total for them
+ * until they have submitted their own scorecard, so other interviewers' scorecards cannot sway
+ * them. A manager or admin who is not interviewing that candidate sees everything.
+ */
+async function blindForInterviewer<T extends { id: number; interviewScore?: unknown; totalScore?: unknown; scoredParts?: number }>(
+  user: { id: number; role: string },
+  rows: T[],
+): Promise<T[]> {
+  const hidden = await scoringService.candidatesToWithhold(user, rows.map((r) => r.id));
+  return hidden.size === 0 ? rows : rows.map((r) => (hidden.has(r.id) ? withholdInterviewScores(r) : r));
+}
 
 export const applyForJob = async (req: Request, res: Response) => {
   try {
@@ -90,14 +130,30 @@ export const applyForJob = async (req: Request, res: Response) => {
     const result = await candidateService.apply(jobId, parsed.data);
 
     logger.info(
-      `New application submitted: candidateId=${result.id}, email="${result.email}", jobId=${jobId}${result.resumeUrl ? ", hasResume=true" : ""}`,
+      `New application submitted: candidateId=${result.id}, jobId=${jobId}${result.resumeKey ? ", hasResume=true" : ""}`,
     );
 
-    if (result.resumeUrl) {
+    // A manager adding someone themselves is not told about it.
+    void notificationService.notifyJobTeam({
+      type: "application_received",
+      jobId,
+      candidateId: result.id,
+      exclude: req.user?.id ?? null,
+    });
+
+    if (result.resumeKey) {
+      requestCvExtraction({
+        candidateId: result.id,
+        resumeKey: result.resumeKey,
+      }).catch((err) =>
+        logger.error(
+          `Failed to enqueue CV text extraction for candidateId=${result.id}: ${getErrorMessage(err)}`,
+        ),
+      );
       requestCvAnalysis({
         candidateId: result.id,
         jobId: result.jobId,
-        resumeUrl: result.resumeUrl,
+        resumeKey: result.resumeKey,
       }).catch((err) =>
         logger.error(
           `Failed to enqueue CV analysis for candidateId=${result.id}: ${getErrorMessage(err)}`,
@@ -105,12 +161,24 @@ export const applyForJob = async (req: Request, res: Response) => {
       );
     }
 
-    res.status(201).json({ data: result });
+    // The applicant is told that it worked and nothing else. The saved row holds their score and
+    // the knockout flag, and seeing those would let them apply again with better answers. A
+    // manager adding an application from the dashboard route also gets the new candidate's id.
+    res.status(201).json({
+      data: req.user ? { applied: true, id: result.id, jobId: result.jobId } : { applied: true },
+    });
   } catch (error: unknown) {
+    if (error instanceof InvalidAnswerError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    if (error instanceof InvalidResumeUploadError) {
+      res.status(400).json({ error: error.message, code: "RESUME_UPLOAD_INVALID" });
+      return;
+    }
     if (error instanceof DuplicateApplicationError) {
-      logger.warn(
-        `Duplicate application attempt: email="${req.body?.email}", jobId=${req.params.jobId}`,
-      );
+      // No email address here: logs are kept after a candidate asks to be deleted.
+      logger.warn(`Duplicate application attempt: jobId=${req.params.jobId}`);
       res.status(409).json({
         error: "You have already applied to this job with this email.",
         code: "DUPLICATE_APPLICATION",
@@ -172,7 +240,18 @@ export const getCandidates = async (req: Request, res: Response) => {
       ? Math.min(200, Math.max(1, parseInt(req.query.limit.toString()) || 25))
       : undefined;
 
+    // The Interview part is part of the total, so an interviewer filtering on score or on "all
+    // parts scored" could work out scores they are not meant to see yet. They get the flag filter only.
+    const scoreFiltersAllowed = req.user.role !== "interviewer";
+    const flagParam = req.query.flag?.toString();
+
     const filters = {
+      minScore: scoreFiltersAllowed ? parseMinScore(req.query.minScore) : undefined,
+      flag: (CANDIDATE_FLAG_FILTERS as readonly string[]).includes(flagParam ?? "")
+        ? (flagParam as CandidateFlagFilter)
+        : undefined,
+      fullyScored: scoreFiltersAllowed && req.query.fullyScored === "true" ? true : undefined,
+      minExperienceYears: parseMinYears(req.query.minExperience),
       stageId: req.query.stageId
         ? parseInt(req.query.stageId.toString())
         : undefined,
@@ -184,14 +263,19 @@ export const getCandidates = async (req: Request, res: Response) => {
         | "hired"
         | "withdrawn"
         | undefined,
+      // Ranking by total would reveal the hidden Interview part to an interviewer.
+      sort:
+        req.query.sort === "score" && req.user.role !== "interviewer"
+          ? ("score" as const)
+          : undefined,
       page,
       limit,
-      teamUserId: req.user.role === "interviewer" ? req.user.id : undefined,
+      teamUserId: teamScope(req.user),
     };
 
     const result = await candidateService.getAll(jobId, filters);
     res.status(200).json({
-      data: result.rows,
+      data: await blindForInterviewer(req.user, result.rows),
       pagination: {
         total: result.total,
         page: result.page,
@@ -215,13 +299,10 @@ export const getCandidateById = async (req: Request, res: Response) => {
       return;
     }
 
-    // Only `interviewer` is job-team-scoped elsewhere (getCandidates' own
-    // teamUserId filter above); hiring_manager/super_admin are company-wide
-    // by design everywhere else (jobs, interviews, offers). Keep that same
-    // split here — widening this check to every role would lock
-    // hiring_manager out of candidates outside their own hiring team.
-    if (req.user.role === "interviewer") {
-      const allowed = await canAccessCandidate(req.user, id);
+    // The rule in shared/auth/job-access.ts: an interviewer sees the candidates of their own
+    // jobs, a hiring manager or super admin sees every candidate.
+    {
+      const allowed = await canViewCandidate(req.user, id);
       if (!allowed) {
         logger.warn(`[access] user ${req.user.id} denied candidate ${id}`);
         res
@@ -237,20 +318,59 @@ export const getCandidateById = async (req: Request, res: Response) => {
       return;
     }
 
-    if (result.resumeUrl) {
-      await r2Service.ensureInlinePdf(result.resumeUrl).catch((error) => {
-        logger.warn(
-          `Unable to prepare inline CV preview for candidate ${id}: ${getErrorMessage(error)}`,
-        );
-      });
-    }
-
-    res.status(200).json({ data: result });
+    const [blinded] = await blindForInterviewer(req.user, [result]);
+    const hidden = blinded !== result;
+    // While AI CV analysis is off, a saved analysis is kept but not sent, so it is hidden in fact
+    // and not only by the page choosing not to draw it.
+    const aiActive = await aiSettingsService.isCvAnalysisActive();
+    res.status(200).json({
+      data: {
+        ...(hidden ? { ...blinded, interviewSpread: null } : result),
+        ...(aiActive ? {} : { cvAnalysis: null }),
+      },
+    });
   } catch (error) {
     logger.error(
       `Failed to fetch candidate id=${req.params.id}: ${getErrorMessage(error)}`,
     );
     res.status(500).json({ error: "Failed to fetch candidate" });
+  }
+};
+
+/** The text read from the candidate's CV, for whoever may open the candidate. */
+export const getCandidateCvText = async (req: Request, res: Response) => {
+  try {
+    const id = parseInt((req.params.id ?? "").toString());
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid candidate ID" });
+      return;
+    }
+
+    if (!(await canViewCandidate(req.user, id))) {
+      logger.warn(`[access] user ${req.user.id} denied candidate ${id}`);
+      res.status(403).json({ error: "You do not have access to this resource" });
+      return;
+    }
+
+    const cvText = await cvTextService.getForCandidate(id);
+    if (!cvText) {
+      res.status(404).json({ error: "This candidate has no CV text" });
+      return;
+    }
+    // One section on its own, for a reader that does not need the whole CV.
+    const section = req.query.section?.toString();
+    if (section) {
+      const sections = (cvText.sections ?? []).filter((s) => s.key === section);
+      res.status(200).json({ data: { status: cvText.status, sections } });
+      return;
+    }
+
+    res.status(200).json({ data: cvText });
+  } catch (error) {
+    logger.error(
+      `Failed to fetch CV text for candidate id=${req.params.id} - user ${req.user?.id}: ${getErrorMessage(error)}`,
+    );
+    res.status(500).json({ error: "Failed to fetch CV text" });
   }
 };
 
@@ -262,30 +382,27 @@ export const getCandidateResume = async (req: Request, res: Response) => {
       return;
     }
 
-    if (req.user.role === "interviewer") {
-      const allowed = await canAccessCandidate(req.user, id);
-      if (!allowed) {
-        res.status(403).json({ error: "You do not have access to this resource" });
-        return;
-      }
+    if (!(await canViewCandidate(req.user, id))) {
+      res.status(403).json({ error: "You do not have access to this resource" });
+      return;
     }
 
-    const candidate = await candidateService.getById(id);
-    if (!candidate?.resumeUrl) {
+    // The file is sent by this server, straight from the private bucket. There is no link to the
+    // stored file, so nothing can be copied out of the dashboard and opened without signing in.
+    const file = await candidateService.getResumeFile(id);
+    const resume = file ? await r2Service.getResume(file.resumeKey) : null;
+    if (!file || !resume) {
       res.status(404).json({ error: "Resume not found" });
       return;
     }
 
-    const resume = await r2Service.getPdfByUrl(candidate.resumeUrl);
-    if (!resume) {
-      res.status(404).json({ error: "Resume not found" });
-      return;
-    }
-
-    res.setHeader("Content-Type", resume.contentType);
-    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      resumeContentDisposition(file.firstName, file.lastName),
+    );
     res.setHeader("Cache-Control", "private, max-age=300");
-    res.send(Buffer.from(resume.body));
+    res.send(resume);
   } catch (error) {
     logger.error(
       `Failed to stream candidate resume id=${req.params.id}: ${getErrorMessage(error)}`,
@@ -335,7 +452,7 @@ export const moveCandidateStage = async (req: Request, res: Response) => {
     );
     res
       .status(400)
-      .json({ error: getErrorMessage(error) || "Failed to move candidate" });
+      .json({ error: safeErrorMessage(error, "Failed to move candidate") });
   }
 };
 
@@ -351,6 +468,11 @@ export const bulkMoveCandidates = async (req: Request, res: Response) => {
         error: "Validation failed",
         details: parsed.error.flatten().fieldErrors,
       });
+      return;
+    }
+
+    if (!(await canViewCandidates(req.user, parsed.data.candidateIds))) {
+      res.status(403).json({ error: "You do not have access to some of these candidates" });
       return;
     }
 
@@ -381,23 +503,38 @@ export const bulkDeleteCandidates = async (req: Request, res: Response) => {
     const parsed = bulkDeleteCandidatesSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
-        error: "Validation failed",
-        details: parsed.error.flatten().fieldErrors,
+        error: "Say which candidates to delete: a list of candidates, or a job and the number to delete",
       });
       return;
     }
 
-    const { jobId, stageId, search, status } = parsed.data;
+    const allowed =
+      "candidateIds" in parsed.data
+        ? await canViewCandidates(req.user, parsed.data.candidateIds)
+        : await canViewJob(req.user, parsed.data.jobId);
+    if (!allowed) {
+      logger.warn(`[access] user ${req.user.id} denied a bulk candidate deletion`);
+      res.status(403).json({ error: "You do not have access to some of these candidates" });
+      return;
+    }
 
-    logger.warn(
-      `Bulk candidate deletion requested: jobId=${jobId ?? "all"}, stageId=${stageId ?? "all"}, status=${status ?? "all"}, search="${search ?? ""}" by user ${req.user?.id}`,
-    );
-
-    const deleted = await candidateService.deleteManyByFilters(jobId, {
-      stageId,
-      search: search || undefined,
-      status,
-    });
+    let deleted: Array<{ id: number; jobId: number }>;
+    if ("candidateIds" in parsed.data) {
+      logger.warn(
+        `Bulk candidate deletion requested: ${parsed.data.candidateIds.length} picked candidate(s) by user ${req.user?.id}`,
+      );
+      deleted = await candidateService.deleteByIds(parsed.data.candidateIds);
+    } else {
+      const { jobId, stageId, search, status, expectedCount } = parsed.data;
+      logger.warn(
+        `Bulk candidate deletion requested: jobId=${jobId}, stageId=${stageId ?? "all"}, status=${status ?? "all"}, search=${search ? "yes" : "no"}, expected=${expectedCount} by user ${req.user?.id}`,
+      );
+      deleted = await candidateService.deleteManyByFilters(
+        jobId,
+        { stageId, search: search || undefined, status },
+        expectedCount,
+      );
+    }
 
     logger.info(
       `Bulk candidate deletion completed: count=${deleted.length} by user ${req.user?.id}`,
@@ -410,6 +547,11 @@ export const bulkDeleteCandidates = async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
+    if (error instanceof BulkDeleteCountChangedError) {
+      // Nothing was deleted. The dashboard reloads the list and asks again with the new number.
+      res.status(409).json({ error: error.message, code: "COUNT_CHANGED", count: error.count });
+      return;
+    }
     logger.error(
       `Failed to bulk delete candidates - user ${req.user?.id}: ${getErrorMessage(error)}`,
     );
@@ -435,7 +577,7 @@ export const deleteCandidate = async (req: Request, res: Response) => {
     }
 
     logger.info(
-      `Candidate deleted: id=${id}, email="${result.email}", jobId=${result.jobId} by user ${req.user?.id}`,
+      `Candidate deleted: id=${id}, jobId=${result.jobId} by user ${req.user?.id}`,
     );
     res.status(200).json({ data: result });
   } catch (error) {
@@ -462,6 +604,7 @@ export const updateCandidateBasicDetails = async (
       res.status(404).json({ error: "Candidate not found" });
       return;
     }
+    const oldResumeKey = (await candidateService.getResumeFile(id))?.resumeKey ?? null;
 
     const normalizedBody = {
       firstName: req.body?.firstName,
@@ -494,44 +637,46 @@ export const updateCandidateBasicDetails = async (
       return;
     }
 
-    let newResumeUrl: string | undefined;
+    let newResumeKey: string | undefined;
     if (req.file) {
       if (req.file.mimetype !== "application/pdf") {
         res.status(400).json({ error: "Only PDF files are allowed" });
         return;
       }
 
-      newResumeUrl = await r2Service.uploadFile(req.file, "resumes");
+      newResumeKey = await r2Service.uploadResume(req.file);
     }
 
     const updated = await candidateService.updateBasicDetails(id, {
       ...parsed.data,
-      ...(newResumeUrl ? { resumeUrl: newResumeUrl } : {}),
+      ...(newResumeKey ? { resumeKey: newResumeKey } : {}),
     });
 
     if (!updated) {
-      if (newResumeUrl) {
-        await r2Service.deleteByUrl(newResumeUrl).catch(() => undefined);
+      if (newResumeKey) {
+        await r2Service.deleteResume(newResumeKey).catch(() => undefined);
       }
       res.status(404).json({ error: "Candidate not found" });
       return;
     }
 
-    if (
-      newResumeUrl &&
-      existing.resumeUrl &&
-      existing.resumeUrl !== newResumeUrl
-    ) {
-      await r2Service.deleteByUrl(existing.resumeUrl).catch((err) => {
-        logger.error("Failed to delete old resume from storage:", err);
-      });
+    if (newResumeKey && oldResumeKey && oldResumeKey !== newResumeKey) {
+      await requestResumeDeletion([oldResumeKey]);
     }
 
-    if (newResumeUrl) {
+    if (newResumeKey) {
+      requestCvExtraction({
+        candidateId: updated.id,
+        resumeKey: newResumeKey,
+      }).catch((err) =>
+        logger.error(
+          `Failed to enqueue CV text extraction for candidateId=${updated.id}: ${getErrorMessage(err)}`,
+        ),
+      );
       requestCvAnalysis({
         candidateId: updated.id,
         jobId: updated.jobId,
-        resumeUrl: newResumeUrl,
+        resumeKey: newResumeKey,
       }).catch((err) =>
         logger.error(
           `Failed to enqueue CV analysis for candidateId=${updated.id}: ${getErrorMessage(err)}`,
@@ -540,15 +685,16 @@ export const updateCandidateBasicDetails = async (
     }
 
     logger.info(
-      `Candidate details updated: id=${id}${newResumeUrl ? ", resumeReplaced=true" : ""} by user ${req.user?.id}`,
+      `Candidate details updated: id=${id}${newResumeKey ? ", resumeReplaced=true" : ""} by user ${req.user?.id}`,
     );
-    res.status(200).json({ data: updated });
+    const { resumeKey, ...details } = updated;
+    res.status(200).json({ data: { ...details, hasResume: resumeKey !== null } });
   } catch (error) {
     logger.error(
       `Failed to update candidate details id=${req.params.id} - user ${req.user?.id}: ${getErrorMessage(error)}`,
     );
     res
       .status(500)
-      .json({ error: getErrorMessage(error) || "Failed to update candidate details" });
+      .json({ error: safeErrorMessage(error, "Failed to update candidate details") });
   }
 };

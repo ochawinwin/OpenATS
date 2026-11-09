@@ -1,38 +1,63 @@
-import {
-  asgardeoMiddleware,
-  createRouteMatcher,
-} from "@asgardeo/nextjs/middleware";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { getSessionCookie } from "better-auth/cookies";
+import { auth } from "@/lib/auth/server";
+import { SESSION_EXPIRED } from "@/lib/client-fetch";
 
-const isPublicRoute = createRouteMatcher([
-  "/",
+const PUBLIC_PATHS = new Set([
+  "/", // the public landing page (public/landing/index.html, see next.config.ts)
   "/login",
+  "/forgot-password",
+  "/reset-password",
   "/careers",
-  "/careers/*",
-  "/assessment/*",
-  "/interview/*",
-  "/offer/*",
-  "/api/public/*",
+  "/robots.txt",
 ]);
 
-export const proxy = asgardeoMiddleware(
-  async (asgardeo, request) => {
-    // Signed-in staff skip the public landing page and the login form.
-    const { pathname } = request.nextUrl;
-    if ((pathname === "/login" || pathname === "/") && asgardeo.isSignedIn()) {
+const PUBLIC_PREFIXES = [
+  "/careers/",
+  "/assessment/",
+  "/assignment/",
+  "/interview/",
+  "/offer/",
+  "/api/public/",
+  "/api/auth/",
+];
+
+function isPublicRoute(pathname: string) {
+  return (
+    PUBLIC_PATHS.has(pathname) ||
+    PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))
+  );
+}
+
+// Only checks the cookie exists. The layout checks the session
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const hasSessionCookie = Boolean(getSessionCookie(request));
+
+  // Signed-in staff skip the public landing page and the login form
+  if ((pathname === "/login" || pathname === "/") && hasSessionCookie) {
+    // Check the session here to avoid a redirect loop
+    const session = await auth.api.getSession({ headers: request.headers });
+    if (session) {
       return NextResponse.redirect(new URL("/dashboard", request.url));
     }
+  }
 
-    if (!isPublicRoute(request)) {
-      const protectionResult = await asgardeo.protectRoute();
+  // A redirect here would hand the login page to code expecting JSON
+  if (!hasSessionCookie && pathname.startsWith("/api/proxy/")) {
+    return NextResponse.json(
+      { error: "Your session has ended. Please sign in again.", code: SESSION_EXPIRED },
+      { status: 401 },
+    );
+  }
 
-      if (protectionResult) {
-        return protectionResult;
-      }
-    }
-  },
-  { signInUrl: "/login" },
-);
+  if (!hasSessionCookie && !isPublicRoute(pathname)) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  return NextResponse.next();
+}
 
 export const config = {
   matcher: [

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { companyService, departmentService } from "./company.service";
 import logger from "../../utils/logger";
 import { getErrorCode, getErrorMessage} from "../../utils/error.utils";
+import { isTimeZone } from "../../shared/services/time-zone";
 
 const upsertCompanySchema = z.object({
   name: z.string().min(1, "Company name is required").max(255),
@@ -12,6 +13,11 @@ const upsertCompanySchema = z.object({
   address: z.string().optional().nullable(),
   description: z.string().optional().nullable(),
   logoUrl: z.string().url("Invalid logo URL").max(1000).optional().nullable(),
+  timeZone: z
+    .string()
+    .max(64)
+    .refine(isTimeZone, "Choose a time zone from the list, such as Asia/Colombo")
+    .optional(),
 });
 
 const createDepartmentSchema = z.object({
@@ -49,6 +55,7 @@ export const getPublicCompany = async (_req: Request, res: Response) => {
             name: result.name,
             logoUrl: result.logoUrl,
             description: result.description,
+            website: result.website,
           }
         : null,
     });

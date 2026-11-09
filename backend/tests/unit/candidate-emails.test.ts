@@ -1,0 +1,174 @@
+import { describe, it, expect } from "vitest";
+import { EMAIL_BRAND_COLOR, emailButton, renderEmailLayout } from "../../src/shared/services/email-layout";
+import {
+  applicationReceivedEmail,
+  interviewConfirmedEmail,
+  interviewSlotsEmail,
+  offerEmail,
+  writtenEmail,
+} from "../../src/shared/services/candidate-emails";
+import { templateEngineService } from "../../src/modules/template/template-engine.service";
+
+describe("renderEmailLayout", () => {
+  const html = renderEmailLayout({ companyName: "Acme & Co", heading: "Hello", bodyHtml: "<p>Body</p>" });
+
+  it("draws a bordered card with softly rounded corners, nothing pill-shaped", () => {
+    expect(html).toContain("border:1px solid");
+    expect(html).toContain("border-radius:12px");
+    expect(html).not.toMatch(/border-radius:(1[3-9]|[2-9][0-9]|9999)px/);
+  });
+
+  it("keeps the brand colour for the button", () => {
+    expect(renderEmailLayout({ companyName: "Acme", bodyHtml: emailButton("https://x.test", "Open") })).toContain(
+      `background:${EMAIL_BRAND_COLOR}`,
+    );
+  });
+
+  it("names the company at the top, with no logo image", () => {
+    expect(html).not.toContain("<img");
+    expect(html).toContain('<a href="https://openats.dev"');
+  });
+
+  it("names the company, escaped, and keeps the body as given", () => {
+    expect(html).toContain("Acme &amp; Co");
+    expect(html).toContain("<p>Body</p>");
+  });
+});
+
+describe("built-in emails", () => {
+  it("escape a candidate's name, which the candidate typed themselves", () => {
+    const { html } = applicationReceivedEmail({
+      companyName: "Acme",
+      candidateName: '<img src=x onerror="alert(1)">',
+      jobTitle: "Engineer",
+    });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+
+  it("put the link to pick a time in the slot email", () => {
+    const { subject, html } = interviewSlotsEmail({
+      companyName: "Acme",
+      candidateName: "Ada Lovelace",
+      eventName: "Technical interview",
+      jobTitle: "Engineer",
+      eventType: "onsite",
+      meetingUrl: null,
+      location: "12 Park Street",
+      bodyText: "See you soon.\nBring ID.",
+      publicUrl: "https://ats.example/interview/abc",
+    });
+    expect(subject).toBe("Technical interview — Engineer");
+    expect(html).toContain('href="https://ats.example/interview/abc"');
+    expect(html).toContain("12 Park Street");
+    expect(html).toContain("See you soon.<br>Bring ID.");
+    expect(html).toContain("On-site");
+  });
+
+  it("show the join button only when there is a meeting link", () => {
+    const base = {
+      companyName: "Acme",
+      candidateName: "Ada",
+      eventName: "Technical interview",
+      eventType: "virtual",
+      scheduledAt: new Date("2026-11-02T10:00:00Z"),
+      durationMinutes: 60,
+      location: null,
+    };
+    expect(interviewConfirmedEmail({ ...base, meetingUrl: "https://meet.example/x" }).html).toContain(
+      "Join the meeting",
+    );
+    expect(interviewConfirmedEmail({ ...base, meetingUrl: null }).html).not.toContain("Join the meeting");
+  });
+
+  it("link the offer email to the review page", () => {
+    const { html } = offerEmail({
+      companyName: "Acme",
+      candidateName: "Ada",
+      jobTitle: "Engineer",
+      reviewUrl: "https://ats.example/offer/tok",
+    });
+    expect(html).toContain('href="https://ats.example/offer/tok"');
+  });
+
+  it("wrap written content without changing it", () => {
+    expect(writtenEmail({ companyName: "Acme", contentHtml: "<p>Dear Ada</p>" })).toContain("<p>Dear Ada</p>");
+  });
+});
+
+describe("templateEngineService.missingVariables", () => {
+  const context = { candidate_name: "Ada", job_title: "Engineer" };
+
+  it("finds variables with no value, in the subject and the body", () => {
+    expect(
+      templateEngineService.missingVariables("About {{job_title}}", "<p>{{candidate_name}}, {{ salary }} {{salary}}</p>", context),
+    ).toEqual(["salary"]);
+  });
+
+  it("returns nothing when every variable has a value", () => {
+    expect(templateEngineService.missingVariables("{{job_title}}", "<p>Hi {{candidate_name}}</p>", context)).toEqual([]);
+  });
+
+  it("reads the older block format too", () => {
+    expect(
+      templateEngineService.missingVariables("Hi", [{ type: "text", content: "Start {{start_date}}" }], context),
+    ).toEqual(["start_date"]);
+  });
+});
+
+import {
+  SYSTEM_EMAILS,
+  SYSTEM_EMAIL_PURPOSES,
+  fillBodyHtml,
+  fillSubject,
+  unknownVariables,
+} from "../../src/shared/services/system-emails";
+
+describe("system email wording", () => {
+  it("only uses variables it declares, in every built-in email", () => {
+    for (const purpose of SYSTEM_EMAIL_PURPOSES) {
+      const { subject, bodyHtml } = SYSTEM_EMAILS[purpose];
+      expect(unknownVariables(purpose, subject, bodyHtml), purpose).toEqual([]);
+    }
+  });
+
+  it("names a variable an email has no value for", () => {
+    expect(unknownVariables("offer", "Hi {{candidate_name}}", "<p>{{ salary }}</p>")).toEqual(["salary"]);
+  });
+
+  it("escapes values in the message but not in the subject", () => {
+    const values = { candidate_name: "A <b>" };
+    expect(fillBodyHtml("<p>Hi {{candidate_name}}</p>", values)).toBe("<p>Hi A &lt;b&gt;</p>");
+    expect(fillSubject("Hi {{ candidate_name }}", values)).toBe("Hi A <b>");
+  });
+
+  it("uses a company's own wording and still adds the button", () => {
+    const { subject, html } = offerEmail({
+      companyName: "Acme",
+      content: { subject: "Good news, {{candidate_name}}", bodyHtml: "<p>Welcome to {{company_name}}.</p>" },
+      candidateName: "Ada",
+      jobTitle: "Engineer",
+      reviewUrl: "https://ats.example/offer/tok",
+    });
+    expect(subject).toBe("Good news, Ada");
+    expect(html).toContain("Welcome to Acme.");
+    expect(html).toContain('href="https://ats.example/offer/tok"');
+  });
+
+  it("lets a message typed while scheduling replace the usual one", () => {
+    const { html } = interviewSlotsEmail({
+      companyName: "Acme",
+      content: { subject: "x", bodyHtml: "<p>USUAL</p>" },
+      candidateName: "Ada",
+      eventName: "Technical interview",
+      jobTitle: "Engineer",
+      eventType: "virtual",
+      meetingUrl: null,
+      location: null,
+      bodyText: "Typed for Ada",
+      publicUrl: "https://ats.example/interview/abc",
+    });
+    expect(html).toContain("Typed for Ada");
+    expect(html).not.toContain("USUAL");
+  });
+});

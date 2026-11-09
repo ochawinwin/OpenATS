@@ -27,6 +27,7 @@ export interface AttemptData {
     id: number;
     title: string;
     description: string | null;
+    /** How long the candidate has, in minutes. */
     timeLimit: number;
     questions: Question[];
   };
@@ -36,6 +37,12 @@ export interface AttemptData {
     lastName: string;
     email: string;
   };
+  /** Company, or null if not set up */
+  company?: { name: string } | null;
+  /** The position the candidate applied for. */
+  jobTitle?: string | null;
+  /** Saved answers so a reload continues */
+  savedAnswers?: { questionId: number; answerText: string | null; optionIds: number[] }[];
 }
 
 export type Answer = { answerText?: string; optionIds?: number[] };
@@ -49,7 +56,3 @@ export type Screen =
   | "quiz"
   | "submitted";
 
-export interface ScoreResult {
-  passed: boolean;
-  scorePercentage: number;
-}

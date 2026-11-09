@@ -1,8 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
+import { requireCandidateView, requireInterviewView } from "../../middlewares/job-access.middleware";
 import { requireManager } from "../../middlewares/role.middleware";
-import { interviewService } from "./interview.service";
-import { mailService } from "../../shared/services/mail.service";
+import { teamScope } from "../../shared/auth/job-access";
+import { interviewService, FeedbackValidationError } from "./interview.service";
+import { DEFAULT_INTERVIEW_MINUTES, completeInterviewBooking } from "./interview-confirm";
+import { getBusyRanges, isInterviewClash } from "./interview-slots";
+import { interviewSlotsEmail } from "../../shared/services/candidate-emails";
+import { emailContext, sendCandidateEmail } from "../../shared/services/candidate-mailer";
 import { socketService } from "../../shared/services/socket.service";
 import { db } from "../../db";
 import {
@@ -14,18 +19,10 @@ import { eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import logger from "../../utils/logger";
 import { integrationConnectionService } from "../../shared/integrations/connection.service";
-import { getErrorMessage} from "../../utils/error.utils";
+import { getErrorMessage, safeErrorMessage } from "../../utils/error.utils";
+import { frontendUrl } from "../../utils/frontend-url";
 
 const router: Router = Router();
-
-const createInterviewSchema = z.object({
-  stageId: z.number().int().optional(),
-  scheduledAt: z.string().optional().nullable(),
-  durationMinutes: z.number().int().positive().optional().nullable(),
-  notes: z.string().optional().nullable(),
-  attendeeEmails: z.array(z.string().email()).optional(),
-  interviewerId: z.number().int(),
-});
 
 const updateInterviewSchema = z.object({
   scheduledAt: z.string().optional().nullable(),
@@ -33,7 +30,7 @@ const updateInterviewSchema = z.object({
   notes: z.string().optional().nullable(),
   outcome: z.enum(["pending", "pass", "fail"]).optional(),
   status: z
-    .enum(["pending_schedule", "scheduled", "completed", "cancelled"])
+    .enum(["pending_schedule", "scheduled", "completed", "cancelled", "expired"])
     .optional(),
   eventName: z.string().min(1).optional(),
   eventType: z.enum(["virtual", "onsite"]).optional(),
@@ -45,49 +42,7 @@ const updateInterviewSchema = z.object({
   attendeeEmails: z.array(z.string().email()).optional(),
 });
 
-router.post("/candidates/:candidateId/interviews", requireManager, async (req, res) => {
-  try {
-    const candidateId = parseInt((req.params.candidateId ?? "").toString());
-    if (isNaN(candidateId)) {
-      res.status(400).json({ error: "Invalid candidate ID" });
-      return;
-    }
-
-    const parsed = createInterviewSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        error: "Validation failed",
-        details: parsed.error.flatten().fieldErrors,
-      });
-      return;
-    }
-
-    const interview = await interviewService.create(
-      {
-        candidateId,
-        stageId: parsed.data.stageId as number | undefined,
-        scheduledAt: parsed.data.scheduledAt ?? null,
-        durationMinutes: parsed.data.durationMinutes ?? null,
-        notes: parsed.data.notes ?? null,
-        attendeeEmails: parsed.data.attendeeEmails,
-        interviewerId: parsed.data.interviewerId,
-      },
-      req.user.id,
-    );
-    socketService.notifyInterviewChanged({
-      interviewId: interview.id,
-      candidateId,
-    });
-    res.status(201).json({ data: interview });
-  } catch (error) {
-    logger.error(`Failed to create interview: ${getErrorMessage(error)}`);
-    res
-      .status(400)
-      .json({ error: getErrorMessage(error) || "Failed to create interview" });
-  }
-});
-
-router.get("/candidates/:candidateId/interviews", async (req, res) => {
+router.get("/candidates/:candidateId/interviews", requireCandidateView(), async (req, res) => {
   try {
     const candidateId = parseInt((req.params.candidateId ?? "").toString());
     if (isNaN(candidateId)) {
@@ -113,7 +68,8 @@ router.get("/interviews", async (req, res) => {
       fromDate: req.query.from as string | undefined,
       toDate: req.query.to as string | undefined,
     };
-    const interviews = await interviewService.getAll(filters);
+    // Everyone but a super admin gets the interviews of their own jobs and the ones assigned to them.
+    const interviews = await interviewService.getAll(filters, teamScope(req.user), req.user.id);
     res.status(200).json({ data: interviews });
   } catch (error) {
     logger.error(`Failed to list interviews: ${getErrorMessage(error)}`);
@@ -121,23 +77,19 @@ router.get("/interviews", async (req, res) => {
   }
 });
 
-// Confirmed upcoming interview times, used to flag already-allocated slots
-router.get("/interviews/allocated-slots", async (req, res) => {
+// When one interviewer is already busy, so the scheduler can mark the times that would clash.
+// Only that interviewer's times are returned, never which candidate or job they are for.
+router.get("/interviews/allocated-slots", requireManager, async (req, res) => {
   try {
-    const rows = await db
-      .select({
-        scheduledAt: candidateInterviews.scheduledAt,
-        interviewerId: candidateInterviews.interviewerId,
-      })
-      .from(candidateInterviews)
-      .where(eq(candidateInterviews.status, "scheduled"));
+    const interviewerId = Number(req.query.interviewerId);
+    if (!Number.isInteger(interviewerId) || interviewerId <= 0) {
+      res.status(200).json({ data: [] });
+      return;
+    }
     const now = Date.now();
-    const data = rows
-      .filter((r) => r.scheduledAt && r.scheduledAt.getTime() >= now)
-      .map((r) => ({
-        datetime: r.scheduledAt!.toISOString(),
-        interviewerId: r.interviewerId,
-      }));
+    const data = (await getBusyRanges(0, interviewerId))
+      .filter((range) => range.end > now)
+      .map((range) => ({ start: new Date(range.start).toISOString(), end: new Date(range.end).toISOString() }));
     res.status(200).json({ data });
   } catch (error) {
     logger.error(`Failed to list allocated slots: ${getErrorMessage(error)}`);
@@ -145,7 +97,7 @@ router.get("/interviews/allocated-slots", async (req, res) => {
   }
 });
 
-router.patch("/interviews/:id", requireManager, async (req, res) => {
+router.patch("/interviews/:id", requireManager, requireInterviewView(), async (req, res) => {
   try {
     const id = parseInt((req.params.id ?? "").toString());
     if (isNaN(id)) {
@@ -171,11 +123,21 @@ router.patch("/interviews/:id", requireManager, async (req, res) => {
     });
     res.status(200).json({ data: interview });
   } catch (error) {
-    res
-      .status(400)
-      .json({ error: getErrorMessage(error) || "Failed to update interview" });
+    if (isInterviewClash(error)) {
+      res.status(409).json({ error: INTERVIEWER_BUSY, code: "SLOT_TAKEN" });
+      return;
+    }
+    logger.error(`Failed to update interview ${req.params.id}: ${getErrorMessage(error)}`);
+    res.status(400).json({ error: safeErrorMessage(error, "Failed to update interview") });
   }
 });
+
+const INTERVIEWER_BUSY = "The interviewer already has an interview at that time. Pick another time.";
+
+const futureDate = z.string().refine((v) => {
+  const d = new Date(v);
+  return !Number.isNaN(d.getTime()) && d.getTime() > Date.now();
+}, "Each time must be a valid date in the future");
 
 const scheduleSchema = z
   .object({
@@ -187,19 +149,21 @@ const scheduleSchema = z
     location: z.string().optional().nullable(),
     bodyText: z.string().optional().nullable(),
     stageId: z.number().int().optional(),
+    durationMinutes: z.number().int().min(5).max(480).default(DEFAULT_INTERVIEW_MINUTES),
+    /** Set when the hiring team has already agreed the time. Then no slots are offered. */
+    scheduledAt: futureDate.optional(),
     timeSlots: z
-      .array(
-        z.object({
-          datetime: z.string().refine((v) => {
-            const d = new Date(v);
-            return !Number.isNaN(d.getTime()) && d.getTime() > Date.now();
-          }, "Each time slot must be a valid date in the future"),
-          selected: z.boolean().default(false),
-        }),
-      )
-      .min(1, "At least one time slot is required"),
+      .array(z.object({ datetime: futureDate, selected: z.boolean().default(false) }))
+      .default([]),
   })
   .superRefine((data, ctx) => {
+    if (!data.scheduledAt && data.timeSlots.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["timeSlots"],
+        message: "Add at least one time slot, or set the time yourself",
+      });
+    }
     if (
       data.eventType === "virtual" &&
       !data.meetingProvider &&
@@ -214,7 +178,7 @@ const scheduleSchema = z
     }
   });
 
-router.post("/candidates/:id/schedule", requireManager, async (req, res) => {
+router.post("/candidates/:id/schedule", requireManager, requireCandidateView("id"), async (req, res) => {
   try {
     const candidateId = parseInt((req.params.id ?? "").toString());
     if (isNaN(candidateId)) {
@@ -264,6 +228,8 @@ router.post("/candidates/:id/schedule", requireManager, async (req, res) => {
 
     const stageId = parsed.data.stageId || candidate.currentStageId || 0;
     const token = randomUUID();
+    // A time the team set themselves is final; otherwise the candidate picks from the slots.
+    const fixedAt = parsed.data.scheduledAt ? new Date(parsed.data.scheduledAt) : null;
 
     const [interview] = await db
       .insert(candidateInterviews)
@@ -278,10 +244,15 @@ router.post("/candidates/:id/schedule", requireManager, async (req, res) => {
         interviewerId: parsed.data.interviewerId,
         location: parsed.data.location ?? null,
         bodyText: parsed.data.bodyText ?? null,
-        timeSlots: parsed.data.timeSlots,
-        status: "pending_schedule",
-        publicToken: token,
-        tokenExpiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+        durationMinutes: parsed.data.durationMinutes,
+        ...(fixedAt
+          ? { status: "scheduled", scheduledAt: fixedAt }
+          : {
+              timeSlots: parsed.data.timeSlots,
+              status: "pending_schedule",
+              publicToken: token,
+              tokenExpiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+            }),
         createdBy: req.user.id,
       })
       .returning();
@@ -293,19 +264,39 @@ router.post("/candidates/:id/schedule", requireManager, async (req, res) => {
       candidateId: candidate.id,
     });
 
-    const publicUrl = `${process.env.FRONTEND_URL || "http://localhost:3000"}/interview/${token}`;
+    if (fixedAt) {
+      // Nothing for the candidate to choose, so go straight to the link, calendar and confirmation.
+      await completeInterviewBooking(interview, fixedAt, { actorId: req.user.id });
+      // Read it again: the booking has just saved the meeting link and the calendar entry.
+      const [booked] = await db
+        .select()
+        .from(candidateInterviews)
+        .where(eq(candidateInterviews.id, interview.id));
+      res.status(201).json({ data: booked ?? interview });
+      return;
+    }
 
-    mailService
-      .sendInterviewSlotEmail(
-        candidate.email,
-        `${candidate.firstName} ${candidate.lastName}`,
-        parsed.data.eventName,
-        candidate.jobTitle ?? "",
-        parsed.data.eventType,
-        parsed.data.meetingUrl ?? null,
-        parsed.data.location ?? null,
-        parsed.data.bodyText ?? null,
-        publicUrl,
+    const publicUrl = frontendUrl(`/interview/${token}`);
+
+    void emailContext("interview_slots")
+      .then((context) =>
+        sendCandidateEmail({
+          candidateId: candidate.id,
+          to: candidate.email,
+          kind: "interview_slots",
+          sentBy: req.user.id,
+          ...interviewSlotsEmail({
+            ...context,
+            candidateName: `${candidate.firstName} ${candidate.lastName}`,
+            eventName: parsed.data.eventName,
+            jobTitle: candidate.jobTitle ?? "",
+            eventType: parsed.data.eventType,
+            meetingUrl: parsed.data.meetingUrl ?? null,
+            location: parsed.data.location ?? null,
+            bodyText: parsed.data.bodyText ?? null,
+            publicUrl,
+          }),
+        }),
       )
       .catch((err: unknown) => {
         logger.error(`Failed to send interview slot email: ${getErrorMessage(err)}`);
@@ -313,54 +304,17 @@ router.post("/candidates/:id/schedule", requireManager, async (req, res) => {
 
     res.status(201).json({ data: interview });
   } catch (error) {
-    logger.error(`Schedule interview failed: ${getErrorMessage(error)}`);
-    res.status(400).json({ error: getErrorMessage(error) });
-  }
-});
-
-router.get("/public/interview/:token", async (req, res) => {
-  try {
-    const [interview] = await db
-      .select({
-        id: candidateInterviews.id,
-        eventName: candidateInterviews.eventName,
-        eventType: candidateInterviews.eventType,
-        meetingUrl: candidateInterviews.meetingUrl,
-        location: candidateInterviews.location,
-        bodyText: candidateInterviews.bodyText,
-        timeSlots: candidateInterviews.timeSlots,
-        status: candidateInterviews.status,
-        candidateName: {
-          first: candidates.firstName,
-          last: candidates.lastName,
-        },
-        jobTitle: jobs.title,
-      })
-      .from(candidateInterviews)
-      .leftJoin(candidates, eq(candidateInterviews.candidateId, candidates.id))
-      .leftJoin(jobs, eq(candidateInterviews.jobId, jobs.id))
-      .where(eq(candidateInterviews.publicToken, req.params.token));
-
-    if (!interview) {
-      res.status(404).json({ error: "Invalid link" });
+    // A time the team set themselves that runs into another of the interviewer's interviews.
+    if (isInterviewClash(error)) {
+      res.status(409).json({ error: INTERVIEWER_BUSY, code: "SLOT_TAKEN" });
       return;
     }
-
-    res.status(200).json({
-      data: {
-        ...interview,
-        candidateName: interview.candidateName
-          ? `${interview.candidateName.first} ${interview.candidateName.last}`
-          : "Unknown",
-      },
-    });
-  } catch (error) {
-    logger.error(`Failed to load interview: ${getErrorMessage(error)}`);
-    res.status(500).json({ error: "Failed to load interview" });
+    logger.error(`Schedule interview failed: ${getErrorMessage(error)}`);
+    res.status(400).json({ error: safeErrorMessage(error, "Failed to schedule the interview") });
   }
 });
 
-router.delete("/interviews/:id", requireManager, async (req, res) => {
+router.delete("/interviews/:id", requireManager, requireInterviewView(), async (req, res) => {
   try {
     const id = parseInt((req.params.id ?? "").toString());
     if (isNaN(id)) {
@@ -378,16 +332,31 @@ router.delete("/interviews/:id", requireManager, async (req, res) => {
     });
     res.status(200).json({ data: deleted });
   } catch (error) {
-    res.status(500).json({ error: getErrorMessage(error) });
+    logger.error(`Failed to delete interview ${req.params.id}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: safeErrorMessage(error, "Failed to delete the interview") });
   }
 });
 
-const feedbackSchema = z.object({
-  content: z.string().min(1, "Feedback content is required"),
-  rating: z.number().int().min(1).max(5).optional().nullable(),
-});
+const feedbackSchema = z
+  .object({
+    content: z.string().default(""),
+    rating: z.number().int().min(1).max(5).optional().nullable(),
+    recommendation: z.enum(["strong_no", "no", "yes", "strong_yes"]).optional().nullable(),
+    ratings: z
+      .array(
+        z.object({
+          criterionId: z.number().int().positive(),
+          rating: z.number().int().min(1).max(5),
+        }),
+      )
+      .optional(),
+  })
+  .refine(
+    (d) => d.content.trim().length > 0 || (d.ratings?.length ?? 0) > 0 || d.recommendation,
+    "Add notes, a recommendation or at least one score",
+  );
 
-router.post("/interviews/:id/feedback", async (req, res) => {
+router.post("/interviews/:id/feedback", requireInterviewView(), async (req, res) => {
   try {
     const interviewId = parseInt((req.params.id ?? "").toString());
     if (isNaN(interviewId)) {
@@ -402,14 +371,12 @@ router.post("/interviews/:id/feedback", async (req, res) => {
       });
       return;
     }
-    const feedback = await interviewService.addFeedback(
-      interviewId,
-      req.user.id,
-      parsed.data.content,
-      parsed.data.rating,
-    );
+    const feedback = await interviewService.addFeedback(interviewId, req.user.id, {
+      ...parsed.data,
+      content: parsed.data.content.trim(),
+    });
     if (!feedback) {
-      res.status(500).json({ error: "Failed to create feedback" });
+      res.status(404).json({ error: "Interview not found" });
       return;
     }
     const [interview] = await db
@@ -424,26 +391,31 @@ router.post("/interviews/:id/feedback", async (req, res) => {
     }
     res.status(201).json({ data: feedback });
   } catch (error) {
-    res.status(500).json({ error: getErrorMessage(error) || "Failed to add feedback" });
+    if (error instanceof FeedbackValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    logger.error(`Failed to add interview feedback: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: safeErrorMessage(error, "Failed to add feedback") });
   }
 });
 
-router.get("/interviews/:id/feedback", async (req, res) => {
+router.get("/interviews/:id/feedback", requireInterviewView(), async (req, res) => {
   try {
     const interviewId = parseInt((req.params.id ?? "").toString());
     if (isNaN(interviewId)) {
       res.status(400).json({ error: "Invalid interview ID" });
       return;
     }
-    const feedback = await interviewService.getFeedback(interviewId);
-    res.status(200).json({ data: feedback });
+    const { data, meta } = await interviewService.getFeedback(interviewId, req.user);
+    res.status(200).json({ data, meta });
   } catch (error) {
     logger.error(`Failed to fetch feedback: ${getErrorMessage(error)}`);
     res.status(500).json({ error: "Failed to fetch feedback" });
   }
 });
 
-router.delete("/interviews/:id/feedback/:feedbackId", requireManager, async (req, res) => {
+router.delete("/interviews/:id/feedback/:feedbackId", requireManager, requireInterviewView(), async (req, res) => {
   try {
     const feedbackId = parseInt((req.params.feedbackId ?? "").toString());
     if (isNaN(feedbackId)) {
@@ -467,7 +439,8 @@ router.delete("/interviews/:id/feedback/:feedbackId", requireManager, async (req
     }
     res.status(200).json({ data: deleted });
   } catch (error) {
-    res.status(500).json({ error: getErrorMessage(error) });
+    logger.error(`Failed to delete interview ${req.params.id}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: safeErrorMessage(error, "Failed to delete the interview") });
   }
 });
 

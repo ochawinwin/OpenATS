@@ -1,29 +1,32 @@
-import { eq, and, desc, asc, gte, lte, ilike, or } from "drizzle-orm";
+import { eq, and, desc, asc, gte, lte, ilike, or, inArray, sql } from "drizzle-orm";
 import { db } from "../../db";
 import {
   candidateInterviews,
   candidates,
   jobs,
+  jobHiringTeam,
   jobPipelineStages,
   interviewFeedback,
+  interviewFeedbackRatings,
+  jobScorecardCriteria,
   users,
 } from "../../db/schema";
+import { scoringService } from "../scoring/scoring.service";
 import { cleanObject as clean } from "../../utils/object.utils";
-import * as gcal from "../../shared/services/google-calendar.service";
-import { mailService } from "../../shared/services/mail.service";
+import { interviewCancelledEmail } from "../../shared/services/candidate-emails";
+import { emailContext, sendCandidateEmail } from "../../shared/services/candidate-mailer";
 import logger from "../../utils/logger";
+import { DEFAULT_INTERVIEW_MINUTES, emailInterviewer } from "./interview-confirm";
+import { notificationService } from "../../shared/services/notification.service";
+import { socketService } from "../../shared/services/socket.service";
 import { getErrorMessage } from "../../utils/error.utils";
 
-export interface CreateInterviewInput {
-  candidateId: number;
-  stageId?: number;
-  scheduledAt?: string | null;
-  durationMinutes?: number | null;
-  notes?: string | null;
-  /** Emails of interviewers to invite (Google Calendar guests) */
-  attendeeEmails?: string[];
-  /** The user conducting the interview — whose connected provider (if any) generates the meeting link */
-  interviewerId: number;
+/** A scorecard that cannot be saved because of what was submitted, not because of a fault. */
+export class FeedbackValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FeedbackValidationError";
+  }
 }
 
 export interface UpdateInterviewInput {
@@ -31,7 +34,7 @@ export interface UpdateInterviewInput {
   durationMinutes?: number | null;
   notes?: string | null;
   outcome?: "pending" | "pass" | "fail";
-  status?: "pending_schedule" | "scheduled" | "completed" | "cancelled";
+  status?: "pending_schedule" | "scheduled" | "completed" | "cancelled" | "expired";
   eventName?: string;
   eventType?: "virtual" | "onsite";
   meetingUrl?: string | null;
@@ -43,110 +46,6 @@ export interface UpdateInterviewInput {
 }
 
 export const interviewService = {
-  /** Create an interview. If Google Calendar is connected, creates event. */
-  async create(input: CreateInterviewInput, createdBy: number | null = null) {
-    // Look up candidate info — also get current stage as fallback
-    const [row] = await db
-      .select({
-        jobId: candidates.jobId,
-        firstName: candidates.firstName,
-        lastName: candidates.lastName,
-        email: candidates.email,
-        currentStageId: candidates.currentStageId,
-        jobTitle: jobs.title,
-        stageName: jobPipelineStages.name,
-      })
-      .from(candidates)
-      .leftJoin(jobs, eq(candidates.jobId, jobs.id))
-      .leftJoin(
-        jobPipelineStages,
-        eq(jobPipelineStages.id, input.stageId || candidates.currentStageId),
-      )
-      .where(eq(candidates.id, input.candidateId));
-
-    if (!row) throw new Error("Candidate not found");
-
-    // Use provided stageId, or fall back to candidate's current stage
-    const resolvedStageId = input.stageId || row.currentStageId || 0;
-
-    const [interview] = await db
-      .insert(candidateInterviews)
-      .values({
-        candidateId: input.candidateId,
-        stageId: resolvedStageId,
-        jobId: row.jobId,
-        scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : null,
-        durationMinutes: input.durationMinutes ?? 30,
-        notes: input.notes ?? null,
-        interviewerId: input.interviewerId,
-        createdBy,
-      })
-      .returning();
-
-    if (!interview) throw new Error("Failed to create interview");
-
-    // Sync to Google Calendar (service account — always available)
-    if (interview.scheduledAt && interview.durationMinutes) {
-      try {
-        const eventId = await gcal.createCalendarEvent({
-          interviewId: interview.id,
-          candidateName: `${row.firstName} ${row.lastName}`,
-          jobTitle: row.jobTitle ?? "",
-          stageName: row.stageName ?? "",
-          scheduledAt: interview.scheduledAt,
-          durationMinutes: interview.durationMinutes,
-          notes: interview.notes,
-          attendeeEmails: input.attendeeEmails ?? [],
-        });
-
-        // Save Google event ID on the interview record
-        await db
-          .update(candidateInterviews)
-          .set({ googleEventId: eventId })
-          .where(eq(candidateInterviews.id, interview.id));
-
-        interview.googleEventId = eventId;
-      } catch (err) {
-        // Don't fail the interview creation just because calendar sync failed
-        logger.error(
-          `Failed to sync interview ${interview.id} to Google Calendar: ${getErrorMessage(err)}`,
-        );
-      }
-    }
-
-    // Send interview invitation email to the candidate
-    if (interview.scheduledAt && interview.durationMinutes) {
-      // try {
-      //   await mailService.sendInterviewInviteEmail(
-      //     row.email,
-      //     `${row.firstName} ${row.lastName}`,
-      //     row.jobTitle ?? "",
-      //     row.stageName ?? "",
-      //     interview.scheduledAt.toISOString(),
-      //     interview.durationMinutes,
-      //   );
-      // } catch (err) {
-      //   logger.error(`Failed to send interview email: ${getErrorMessage(err)}`);
-      // }
-      if (interview.scheduledAt && interview.durationMinutes) {
-        mailService
-          .sendInterviewInviteEmail(
-            row.email,
-            `${row.firstName} ${row.lastName}`,
-            row.jobTitle ?? "",
-            row.stageName ?? "",
-            interview.scheduledAt.toISOString(),
-            interview.durationMinutes,
-          )
-          .catch((err: unknown) => {
-            logger.error(`Failed to send interview email: ${getErrorMessage(err)}`);
-          });
-      }
-    }
-
-    return interview;
-  },
-
   async getByCandidateAndStage(candidateId: number, stageId: number) {
     return db
       .select()
@@ -175,8 +74,24 @@ export const interviewService = {
     search?: string;
     fromDate?: string;
     toDate?: string;
-  }) {
+  }, interviewerUserId?: number, viewerId?: number) {
     const conditions = [];
+
+    // The same rule as canViewInterview, for the whole list.
+    if (interviewerUserId) {
+      conditions.push(
+        or(
+          eq(candidateInterviews.interviewerId, interviewerUserId),
+          inArray(
+            candidateInterviews.jobId,
+            db
+              .select({ id: jobHiringTeam.jobId })
+              .from(jobHiringTeam)
+              .where(eq(jobHiringTeam.userId, interviewerUserId)),
+          ),
+        )!,
+      );
+    }
 
     if (filters?.jobId) {
       conditions.push(eq(candidateInterviews.jobId, filters.jobId));
@@ -234,6 +149,10 @@ export const interviewService = {
         jobTitle: jobs.title,
         stageName: jobPipelineStages.name,
         stageType: jobPipelineStages.stageType,
+        // Whether the person asking has written a scorecard for it, for their to-do list
+        myScorecardSubmitted: viewerId
+          ? sql<boolean>`exists (select 1 from interview_feedback f where f.interview_id = ${candidateInterviews.id} and f.author_id = ${viewerId})`
+          : sql<boolean>`false`,
       })
       .from(candidateInterviews)
       .leftJoin(candidates, eq(candidateInterviews.candidateId, candidates.id))
@@ -300,74 +219,177 @@ export const interviewService = {
 
     if (!updated) return null;
 
-    // Sync to Google Calendar (service account — always available)
-    if (updated.googleEventId) {
-      try {
-        const [row] = await db
-          .select({
-            firstName: candidates.firstName,
-            lastName: candidates.lastName,
-            jobTitle: jobs.title,
-            stageName: jobPipelineStages.name,
-          })
-          .from(candidates)
-          .leftJoin(jobs, eq(candidates.jobId, jobs.id))
-          .leftJoin(
-            jobPipelineStages,
-            eq(jobPipelineStages.id, updated.stageId),
-          )
-          .where(eq(candidates.id, updated.candidateId));
+    // A booked interview given to someone else: the new interviewer is told and emailed.
+    if (
+      input.interviewerId &&
+      input.interviewerId !== existing.interviewerId &&
+      updated.status === "scheduled" &&
+      updated.scheduledAt
+    ) {
+      void notificationService.notifyPeople({
+        type: "interview_booked",
+        jobId: updated.jobId,
+        candidateId: updated.candidateId,
+        userIds: [input.interviewerId],
+      });
+      void emailInterviewer(updated, updated.scheduledAt);
+    }
 
-        if (row && updated.scheduledAt && updated.durationMinutes) {
-          await gcal.updateCalendarEvent(updated.googleEventId, {
-            interviewId: updated.id,
-            candidateName: `${row.firstName} ${row.lastName}`,
-            jobTitle: row.jobTitle ?? "",
-            stageName: row.stageName ?? "",
-            scheduledAt: updated.scheduledAt,
-            durationMinutes: updated.durationMinutes,
-            notes: updated.notes,
-            attendeeEmails: input.attendeeEmails ?? [],
-            meetingUrl: updated.meetingUrl,
-          });
+    // Keep the entry in the interviewer's own calendar in step with a new time
+    if (updated.providerMeetingId && updated.interviewerId && updated.scheduledAt) {
+      try {
+        const { integrationConnectionService } = await import(
+          "../../shared/integrations/connection.service"
+        );
+        const { getProviderClient } = await import("../../shared/integrations/registry");
+        const accessToken = await integrationConnectionService.getValidAccessToken(updated.interviewerId);
+        if (accessToken) {
+          await getProviderClient(updated.meetingProvider ?? "google_meet").updateMeeting(
+            accessToken,
+            updated.providerMeetingId,
+            {
+              eventName: updated.eventName ?? "Interview",
+              scheduledAt: updated.scheduledAt,
+              durationMinutes: updated.durationMinutes ?? DEFAULT_INTERVIEW_MINUTES,
+            },
+          );
         }
       } catch (err) {
-        logger.error(
-          `Failed to sync interview ${id} to Google Calendar: ${getErrorMessage(err)}`,
-        );
+        logger.error(`Failed to update the calendar entry for interview ${id}: ${getErrorMessage(err)}`);
       }
     }
 
     return updated;
   },
 
+  /**
+   * Interviews whose time-picking link ran out before the candidate chose a time. The link
+   * already stops working then; this makes the dashboard say so instead of "waiting" forever,
+   * and tells the team. Returns how many were marked.
+   */
+  async expireStaleSlotLinks(now: Date = new Date()): Promise<number> {
+    const expired = await db
+      .update(candidateInterviews)
+      .set({ status: "expired", updatedAt: now })
+      .where(
+        and(
+          eq(candidateInterviews.status, "pending_schedule"),
+          lte(candidateInterviews.tokenExpiresAt, now),
+        ),
+      )
+      .returning({
+        id: candidateInterviews.id,
+        candidateId: candidateInterviews.candidateId,
+        jobId: candidateInterviews.jobId,
+        createdBy: candidateInterviews.createdBy,
+      });
+
+    for (const iv of expired) {
+      socketService.notifyInterviewChanged({ interviewId: iv.id, candidateId: iv.candidateId });
+      await notificationService.notifyJobTeam({
+        type: "interview_link_expired",
+        jobId: iv.jobId,
+        candidateId: iv.candidateId,
+        also: [iv.createdBy],
+      });
+    }
+    return expired.length;
+  },
+
   // ── Interview Feedback ──
 
+  /**
+   * Saves an interviewer's scorecard. There is one per interviewer per interview, so submitting
+   * again replaces it.
+   */
   async addFeedback(
     interviewId: number,
     authorId: number,
-    content: string,
-    rating?: number | null,
+    input: {
+      content: string;
+      rating?: number | null | undefined;
+      recommendation?: "strong_no" | "no" | "yes" | "strong_yes" | null | undefined;
+      ratings?: { criterionId: number; rating: number }[] | undefined;
+    },
   ) {
-    const [feedback] = await db
-      .insert(interviewFeedback)
-      .values({
-        interviewId,
-        authorId,
-        content,
-        rating: rating ?? null,
-      })
-      .returning();
-    return feedback ?? null;
+    const [interview] = await db
+      .select({ candidateId: candidateInterviews.candidateId, jobId: candidateInterviews.jobId })
+      .from(candidateInterviews)
+      .where(eq(candidateInterviews.id, interviewId));
+    if (!interview) return null;
+
+    const ratings = input.ratings ?? [];
+    if (ratings.length > 0) {
+      const valid = await db
+        .select({ id: jobScorecardCriteria.id })
+        .from(jobScorecardCriteria)
+        .where(
+          and(
+            eq(jobScorecardCriteria.jobId, interview.jobId),
+            inArray(jobScorecardCriteria.id, ratings.map((r) => r.criterionId)),
+          ),
+        );
+      if (valid.length !== new Set(ratings.map((r) => r.criterionId)).size) {
+        throw new FeedbackValidationError("Unknown scorecard criterion");
+      }
+    }
+
+    const feedback = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({ id: interviewFeedback.id })
+        .from(interviewFeedback)
+        .where(
+          and(
+            eq(interviewFeedback.interviewId, interviewId),
+            eq(interviewFeedback.authorId, authorId),
+          ),
+        );
+
+      const values = {
+        content: input.content,
+        rating: input.rating ?? null,
+        recommendation: input.recommendation ?? null,
+      };
+      const [row] = existing
+        ? await tx
+            .update(interviewFeedback)
+            .set({ ...values, updatedAt: new Date() })
+            .where(eq(interviewFeedback.id, existing.id))
+            .returning()
+        : await tx
+            .insert(interviewFeedback)
+            .values({ interviewId, authorId, ...values })
+            .returning();
+      if (!row) return null;
+
+      await tx
+        .delete(interviewFeedbackRatings)
+        .where(eq(interviewFeedbackRatings.feedbackId, row.id));
+      if (ratings.length > 0) {
+        await tx.insert(interviewFeedbackRatings).values(
+          ratings.map((r) => ({ feedbackId: row.id, criterionId: r.criterionId, rating: r.rating })),
+        );
+      }
+      await scoringService.recompute(interview.candidateId, tx);
+      return row;
+    });
+    return feedback;
   },
 
-  async getFeedback(interviewId: number) {
+  /**
+   * The scorecards on an interview. An interviewer, or whoever is assigned to this interview,
+   * sees nobody else's until they have submitted their own, so they are not swayed by it.
+   * Managers and admins who are not interviewing see all of them.
+   */
+  async getFeedback(interviewId: number, viewer: { id: number; role: string }) {
     const rows = await db
       .select({
         id: interviewFeedback.id,
         interviewId: interviewFeedback.interviewId,
+        authorId: interviewFeedback.authorId,
         content: interviewFeedback.content,
         rating: interviewFeedback.rating,
+        recommendation: interviewFeedback.recommendation,
         createdAt: interviewFeedback.createdAt,
         updatedAt: interviewFeedback.updatedAt,
         authorName: {
@@ -380,20 +402,60 @@ export const interviewService = {
       .where(eq(interviewFeedback.interviewId, interviewId))
       .orderBy(desc(interviewFeedback.createdAt));
 
-    return rows.map((r) => ({
-      ...r,
-      authorName: r.authorName
-        ? `${r.authorName.first} ${r.authorName.last}`
-        : "Unknown",
-    }));
+    const hasSubmitted = rows.some((r) => r.authorId === viewer.id);
+    // Interviewers are always blind until they submit, and so is anyone assigned to this interview.
+    const [assignment] = await db
+      .select({ interviewerId: candidateInterviews.interviewerId })
+      .from(candidateInterviews)
+      .where(eq(candidateInterviews.id, interviewId));
+    const isAssigned = assignment?.interviewerId === viewer.id;
+    const blind = (viewer.role === "interviewer" || isAssigned) && !hasSubmitted;
+    const visible = blind ? [] : rows;
+
+    const criterionRows =
+      visible.length > 0
+        ? await db
+            .select({
+              feedbackId: interviewFeedbackRatings.feedbackId,
+              criterionId: interviewFeedbackRatings.criterionId,
+              name: jobScorecardCriteria.name,
+              rating: interviewFeedbackRatings.rating,
+            })
+            .from(interviewFeedbackRatings)
+            .innerJoin(
+              jobScorecardCriteria,
+              eq(interviewFeedbackRatings.criterionId, jobScorecardCriteria.id),
+            )
+            .where(inArray(interviewFeedbackRatings.feedbackId, visible.map((r) => r.id)))
+            .orderBy(asc(jobScorecardCriteria.position))
+        : [];
+
+    return {
+      data: visible.map(({ authorName, ...r }) => ({
+        ...r,
+        authorName: authorName ? `${authorName.first} ${authorName.last}` : "Unknown",
+        ratings: criterionRows
+          .filter((c) => c.feedbackId === r.id)
+          .map(({ feedbackId: _f, ...c }) => c),
+      })),
+      meta: { hasSubmitted, hiddenCount: blind ? rows.length : 0 },
+    };
   },
 
   async deleteFeedback(feedbackId: number) {
-    const [deleted] = await db
-      .delete(interviewFeedback)
-      .where(eq(interviewFeedback.id, feedbackId))
-      .returning();
-    return deleted ?? null;
+    return db.transaction(async (tx) => {
+      const [deleted] = await tx
+        .delete(interviewFeedback)
+        .where(eq(interviewFeedback.id, feedbackId))
+        .returning();
+      if (!deleted) return null;
+      const [interview] = await tx
+        .select({ candidateId: candidateInterviews.candidateId })
+        .from(candidateInterviews)
+        .where(eq(candidateInterviews.id, deleted.interviewId));
+      if (interview) await scoringService.recompute(interview.candidateId, tx);
+      return deleted;
+    });
   },
 
   async delete(id: number) {
@@ -403,12 +465,8 @@ export const interviewService = {
       .where(eq(candidateInterviews.id, id));
     if (!existing) return null;
 
-    // Cancel the Meet event on the interviewer's calendar so attendees are notified
-    if (
-      existing.providerMeetingId &&
-      existing.meetingProvider &&
-      existing.interviewerId
-    ) {
+    // Cancel the entry in the interviewer's calendar so attendees are notified
+    if (existing.providerMeetingId && existing.interviewerId) {
       try {
         const { integrationConnectionService } = await import(
           "../../shared/integrations/connection.service"
@@ -419,7 +477,7 @@ export const interviewService = {
             existing.interviewerId,
           );
         if (accessToken) {
-          await getProviderClient(existing.meetingProvider).deleteMeeting(
+          await getProviderClient(existing.meetingProvider ?? "google_meet").deleteMeeting(
             accessToken,
             existing.providerMeetingId,
           );
@@ -431,17 +489,6 @@ export const interviewService = {
       } catch (err) {
         logger.error(
           `Failed to cancel provider meeting for interview ${id}: ${getErrorMessage(err)}`,
-        );
-      }
-    }
-
-    // Delete Google Calendar event if synced (sendUpdates:all notifies attendees)
-    if (existing.googleEventId) {
-      try {
-        await gcal.deleteCalendarEvent(existing.googleEventId);
-      } catch (err) {
-        logger.error(
-          `Failed to delete calendar event for interview ${id}: ${getErrorMessage(err)}`,
         );
       }
     }
@@ -462,12 +509,20 @@ export const interviewService = {
         .from(candidates)
         .where(eq(candidates.id, existing.candidateId));
       if (candidate) {
-        mailService
-          .sendInterviewCancellationEmail(
-            candidate.email,
-            `${candidate.firstName} ${candidate.lastName}`,
-            existing.eventName,
-            existing.scheduledAt,
+        const eventName = existing.eventName;
+        void emailContext("interview_cancelled")
+          .then((context) =>
+            sendCandidateEmail({
+              candidateId: existing.candidateId,
+              to: candidate.email,
+              kind: "interview_cancelled",
+              ...interviewCancelledEmail({
+                ...context,
+                candidateName: `${candidate.firstName} ${candidate.lastName}`,
+                eventName,
+                scheduledAt: existing.scheduledAt,
+              }),
+            }),
           )
           .catch((err: unknown) => {
             logger.error(

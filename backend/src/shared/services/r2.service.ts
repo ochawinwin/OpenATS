@@ -1,23 +1,43 @@
 import {
-  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
-  HeadObjectCommand,
   S3Client,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import crypto from "crypto";
 import logger from "../../utils/logger";
+import { localStorage } from "./local-storage";
 
-const r2Client = new S3Client({
-  region: "us-east-1",
-  endpoint: process.env.R2_ENDPOINT!,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
-  },
-  forcePathStyle: true,
-});
+// STORAGE=local keeps files in a folder on this server instead (local-storage.ts), as in the
+// Docker quickstart. Everything else here behaves the same either way.
+const isLocal = () => process.env.STORAGE === "local";
+
+// Created on first use, so a server that keeps files locally never needs the R2 settings.
+let client: S3Client | null = null;
+function r2Client(): S3Client {
+  client ??= new S3Client({
+    region: "us-east-1",
+    endpoint: process.env.R2_ENDPOINT!,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    },
+    forcePathStyle: true,
+  });
+  return client;
+}
+
+/** Where logos are served from when files are kept locally: this API's public address. */
+function localLogoUrl(name: string): string {
+  const base = (process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 8080}`).replace(/\/+$/, "");
+  return `${base}/public/files/logos/${name}`;
+}
+
+// Two buckets. Logos are shown on the careers page and in emails, so they live in a bucket anyone
+// can read. CVs hold personal data: their bucket has no public access at all, and a CV only leaves
+// it through this server, after the access check on the route.
+const publicBucket = () => process.env.R2_BUCKET_NAME!;
+const privateBucket = () => process.env.R2_PRIVATE_BUCKET_NAME!;
 
 // Server-controlled extension per content type. We never trust the client
 // filename for the stored key (an attacker could upload a `.html`/`.svg`).
@@ -29,120 +49,79 @@ const EXT_BY_MIME: Record<string, string> = {
   "image/svg+xml": ".svg",
 };
 
+async function put(
+  bucket: string,
+  key: string,
+  file: Express.Multer.File,
+  inline: boolean,
+): Promise<void> {
+  try {
+    await r2Client().send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+        ContentDisposition: inline ? "inline" : "attachment",
+      }),
+    );
+  } catch (error) {
+    logger.error(`Attempting upload to Bucket: ${bucket}`);
+    throw error;
+  }
+}
+
 export const r2Service = {
-  async uploadFile(
-    file: Express.Multer.File,
-    folder: "resumes" | "logos" = "resumes",
-  ): Promise<string> {
-    const fileExt = EXT_BY_MIME[file.mimetype] ?? "";
-    const fileName = `${folder}/${crypto.randomUUID()}${fileExt}`;
-
-    // PDFs are rendered by the browser's built-in document viewer; raster
-    // logos render in the UI. SVGs and all other file types remain downloads
-    // so uploaded executable markup can never be opened inline.
-    const isInlineableFile =
-      file.mimetype === "application/pdf" ||
-      (folder === "logos" &&
-        ["image/png", "image/jpeg", "image/webp"].includes(file.mimetype));
-
-    const command = new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME!,
-      Key: fileName,
-      Body: file.buffer,
-      ContentType: file.mimetype,
-      ContentDisposition: isInlineableFile ? "inline" : "attachment",
-    });
-
-    try {
-      await r2Client.send(command);
-    } catch (error) {
-      logger.error(
-        `Attempting upload to Bucket: ${process.env.R2_BUCKET_NAME}`,
-      );
-      throw error;
+  /** Stores a logo in the public bucket (or the local folder) and returns its public URL. */
+  async uploadLogo(file: Express.Multer.File): Promise<string> {
+    const name = `${crypto.randomUUID()}${EXT_BY_MIME[file.mimetype] ?? ""}`;
+    if (isLocal()) {
+      await localStorage.putLogo(name, file.buffer);
+      return localLogoUrl(name);
     }
+    const key = `logos/${name}`;
+
+    // Raster logos render in the UI. SVGs and all other file types remain
+    // downloads so uploaded executable markup can never be opened inline.
+    const inline = ["image/png", "image/jpeg", "image/webp"].includes(file.mimetype);
+    await put(publicBucket(), key, file, inline);
 
     const publicUrl = process.env.R2_PUBLIC_URL?.endsWith("/")
       ? process.env.R2_PUBLIC_URL.slice(0, -1)
       : process.env.R2_PUBLIC_URL;
 
-    return `${publicUrl}/${fileName}`;
+    return `${publicUrl}/${key}`;
   },
 
-  extractKeyFromUrl(fileUrl: string): string | null {
-    if (!fileUrl) return null;
-
-    const base = process.env.R2_PUBLIC_URL?.endsWith("/")
-      ? process.env.R2_PUBLIC_URL.slice(0, -1)
-      : process.env.R2_PUBLIC_URL;
-
-    if (!base) return null;
-    if (!fileUrl.startsWith(`${base}/`)) return null;
-
-    return fileUrl.replace(`${base}/`, "");
+  /**
+   * Stores a CV in the private bucket and returns its key. The key is what the database keeps:
+   * there is no URL for a CV, so there is no link that works without signing in.
+   */
+  async uploadResume(file: Express.Multer.File): Promise<string> {
+    const key = `resumes/${crypto.randomUUID()}.pdf`;
+    if (isLocal()) await localStorage.putResume(key, file.buffer);
+    else await put(privateBucket(), key, file, true);
+    return key;
   },
 
-  async deleteByUrl(fileUrl: string): Promise<void> {
-    const key = this.extractKeyFromUrl(fileUrl);
-    if (!key) return;
+  /** The stored CV's bytes. Null when there is no such file. */
+  async getResume(key: string): Promise<Buffer | null> {
+    if (isLocal()) return localStorage.getResume(key);
+    try {
+      const result = await r2Client().send(
+        new GetObjectCommand({ Bucket: privateBucket(), Key: key }),
+      );
+      if (!result.Body) return null;
 
-    const command = new DeleteObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME!,
-      Key: key,
-    });
-
-    await r2Client.send(command);
-  },
-
-  /** Upgrades PDFs uploaded before inline viewing was introduced. */
-  async ensureInlinePdf(fileUrl: string): Promise<void> {
-    const key = this.extractKeyFromUrl(fileUrl);
-    if (!key || !key.endsWith(".pdf")) return;
-
-    const bucket = process.env.R2_BUCKET_NAME!;
-    const current = await r2Client.send(
-      new HeadObjectCommand({ Bucket: bucket, Key: key }),
-    );
-
-    if (current.ContentDisposition?.toLowerCase().startsWith("inline")) {
-      return;
+      return Buffer.from(await result.Body.transformToByteArray());
+    } catch (error) {
+      if (error instanceof Error && error.name === "NoSuchKey") return null;
+      throw error;
     }
-
-    const copySource = `${bucket}/${key
-      .split("/")
-      .map((segment) => encodeURIComponent(segment))
-      .join("/")}`;
-
-    await r2Client.send(
-      new CopyObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        CopySource: copySource,
-        MetadataDirective: "REPLACE",
-        ContentType: current.ContentType ?? "application/pdf",
-        ContentDisposition: "inline",
-      }),
-    );
   },
 
-  async getPdfByUrl(fileUrl: string): Promise<{
-    body: Uint8Array;
-    contentType: string;
-  } | null> {
-    const key = this.extractKeyFromUrl(fileUrl);
-    if (!key || !key.endsWith(".pdf")) return null;
-
-    const result = await r2Client.send(
-      new GetObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME!,
-        Key: key,
-      }),
-    );
-    if (!result.Body) return null;
-
-    return {
-      body: await result.Body.transformToByteArray(),
-      contentType: result.ContentType ?? "application/pdf",
-    };
+  async deleteResume(key: string): Promise<void> {
+    if (isLocal()) return localStorage.deleteResume(key);
+    await r2Client().send(new DeleteObjectCommand({ Bucket: privateBucket(), Key: key }));
   },
 };

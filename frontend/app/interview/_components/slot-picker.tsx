@@ -12,6 +12,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { InterviewData } from "../types";
 import ConfirmedState from "./confirmed-state";
 import ErrorState from "./error-state";
+import { formatTime } from "@/lib/format";
+import { useViewerTimeZone, zoneLabel } from "../_lib/viewer-time-zone";
 
 function fmtDate(dt: string) {
   return new Date(dt).toLocaleDateString("en-US", {
@@ -19,13 +21,6 @@ function fmtDate(dt: string) {
     month: "long",
     day: "numeric",
     year: "numeric",
-  });
-}
-
-function fmtTime(dt: string) {
-  return new Date(dt).toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
   });
 }
 
@@ -40,11 +35,13 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  // Slots discovered to be taken after page load (confirm attempt lost a race)
+  // Slots taken after the page loaded
   const [takenIndexes, setTakenIndexes] = useState<Set<number>>(new Set());
   const [notice, setNotice] = useState<string | null>(null);
-  // Fixed at mount so re-renders cannot reshuffle which slots read as past.
+  // Fixed on mount so past slots don't change
   const [now] = useState(() => Date.now());
+  // Times are written only once the candidate's own zone is known, never in the server's.
+  const timeZone = useViewerTimeZone();
 
   const handleConfirm = async () => {
     if (selectedSlot === null) return;
@@ -59,7 +56,7 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         if (body?.code === "SLOT_TAKEN") {
-          // Someone else confirmed this time — grey it out and let them retry
+          // Someone took this slot, grey it out
           setTakenIndexes((prev) => new Set(prev).add(selectedSlot));
           setSelectedSlot(null);
           setNotice(body.error);
@@ -90,7 +87,11 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
         </h1>
 
         <p className="mt-2 text-sm text-slate-500 dark:text-neutral-400">
-          {[data.jobTitle, data.eventType === "virtual" ? "Virtual" : "On-site"]
+          {[
+            data.jobTitle,
+            data.eventType === "virtual" ? "Virtual" : "On-site",
+            data.durationMinutes ? `${data.durationMinutes} minutes` : null,
+          ]
             .filter(Boolean)
             .join(" · ")}
         </p>
@@ -138,6 +139,7 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
         </h2>
         <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
           Select the slot that works best for you.
+          {timeZone && <> Times are in your time zone, {zoneLabel(timeZone)}.</>}
         </p>
 
         {notice && (
@@ -147,7 +149,12 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
         )}
 
         <div className="mt-6 space-y-2.5">
-          {(data.timeSlots ?? []).map((slot, i) => {
+          {!timeZone && (
+            <div className="flex justify-center py-6">
+              <Spinner />
+            </div>
+          )}
+          {timeZone && (data.timeSlots ?? []).map((slot, i) => {
             const isPast = new Date(slot.datetime).getTime() <= now;
             const isTaken = !!slot.taken || takenIndexes.has(i);
             const isActive = selectedSlot === i;
@@ -180,7 +187,7 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
                       {fmtDate(slot.datetime)}
                     </span>
                     <span className="block text-sm text-slate-500 dark:text-neutral-400 mt-0.5">
-                      {fmtTime(slot.datetime)}
+                      {formatTime(slot.datetime)}
                     </span>
                   </span>
                 </span>
@@ -219,7 +226,7 @@ export default function SlotPicker({ data, token, apiBase }: Props) {
             type="button"
             onClick={handleConfirm}
             disabled={selectedSlot === null || confirming}
-            className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-neutral-900 hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300 text-white px-6 h-11 font-medium text-sm transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-theme hover:bg-theme-hover text-white px-6 h-11 font-medium text-sm transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {confirming && <Spinner className="size-3.5" />}
             {confirming ? "Confirming" : "Confirm this time"}

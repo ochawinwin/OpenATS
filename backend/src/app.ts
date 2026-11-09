@@ -9,26 +9,26 @@ import { errorMiddleware } from "./middlewares/error.middleware";
 import { swaggerUi, swaggerDocument } from "./config/swagger";
 import { authMiddleware } from "./middlewares/auth.middleware";
 import { apiLimiter } from "./middlewares/rate-limit.middleware";
-import { pageSettingsService } from "./modules/settings/page-settings.service";
+import {
+  frontendOrigin,
+  normalizeOrigin,
+  pageSettingsService,
+} from "./modules/settings/page-settings.service";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
 import { createRedisConnection } from "./config/redis";
 import logger from "./utils/logger";
+import { DEFAULT_TRUST_PROXY, parseTrustProxy } from "./config/env";
+import { getWorkerStatus } from "./queues/worker-status";
 
 const healthRedis = createRedisConnection();
 
 const app: Express = express();
 
-// Behind a reverse proxy (Railway, Render, ...) req.ip is the proxy's address
-// unless we trust the first X-Forwarded-For hop. Without this every visitor
-// shares one rate-limit bucket on the public routes.
-app.set("trust proxy", 1);
+// Before anything reads req.ip: the request log and every per-IP rate limit depend on it.
+app.set("trust proxy", parseTrustProxy(process.env.TRUST_PROXY) ?? DEFAULT_TRUST_PROXY);
 
 app.use(helmet());
-
-function normalizeOrigin(origin: string): string {
-  return origin.trim().replace(/\/$/, "");
-}
 
 app.use(
   cors({
@@ -39,15 +39,13 @@ app.use(
       }
 
       const requestOrigin = normalizeOrigin(origin);
-      const fallbackFrontend = normalizeOrigin(
-        process.env.FRONTEND_URL ?? "http://localhost:3000",
-      );
 
-      if (requestOrigin === fallbackFrontend) {
+      if (requestOrigin === frontendOrigin()) {
         callback(null, true);
         return;
       }
 
+      // Cached in memory by the service, so this is not a database read per request.
       pageSettingsService
         .getAllowedOrigins()
         .then((origins) => {
@@ -98,9 +96,18 @@ app.get("/health", async (req, res) => {
   }
 
   const healthy = Object.values(checks).every((v) => v === "ok");
+
+  // Reported, but not part of whether this server is healthy: the worker is another process, and
+  // restarting the API because the worker is down would fix nothing. A monitor can alert on it.
+  const worker = checks.redis === "ok" ? await getWorkerStatus() : "unknown";
+
   res.status(healthy ? 200 : 503).json({
     status: healthy ? "ok" : "degraded",
     checks,
+    worker,
+    ...(worker === "missing"
+      ? { warning: "No background worker is connected. CVs will not be read until it is started." }
+      : {}),
   });
 });
 

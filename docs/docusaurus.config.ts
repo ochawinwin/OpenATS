@@ -5,9 +5,11 @@ import type * as Preset from '@docusaurus/preset-classic';
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 const config: Config = {
-  title: 'An open-source hiring platform to streamline recruitment and hire faster.',
+  title: 'OpenATS',
   tagline: 'An open-source applicant tracking system for clear, adaptable hiring.',
   favicon: 'img/favicon.png',
+
+  stylesheets: [],
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
@@ -28,15 +30,15 @@ const config: Config = {
   onBrokenLinks: 'throw',
 
   plugins: [
-    [
-      'docusaurus-plugin-copy-page-button',
-      {
-        enabledActions: ['copy', 'view', 'chatgpt', 'claude', 'perplexity', 'gemini'],
-        placement: 'auto',
+    // Tailwind, used only by the product tour on the home page (src/components/ProductTour/app.css)
+    () => ({
+      name: 'tailwind',
+      configurePostCss(postcssOptions) {
+        postcssOptions.plugins.push(require('@tailwindcss/postcss'));
+        return postcssOptions;
       },
-    ],
+    }),
   ],
-
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang. For example, if your site is Chinese, you
   // may want to replace "en" with "zh-Hans".
@@ -54,15 +56,16 @@ const config: Config = {
           // Keep dependency READMEs out of the docs content glob. The copy
           // page plugin is installed in the workspace and ships Markdown files.
           exclude: ['**/node_modules/**'],
-          editUrl: 'https://github.com/chamals3n4/OpenATS/tree/main/docs/',
         },
         blog: {
+          blogTitle: 'Blog',
+          blogDescription: 'Release notes, announcements and guides from the OpenATS team.',
+          blogSidebarCount: 0,
           showReadingTime: true,
           feedOptions: {
             type: ['rss', 'atom'],
             xslt: true,
           },
-          editUrl: 'https://github.com/chamals3n4/OpenATS/tree/main/docs/',
           // Useful options to enforce blogging best practices
           onInlineTags: 'warn',
           onInlineAuthors: 'warn',
@@ -80,14 +83,18 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/brand/openats-logo.png',
+    // Social preview for links shared on X, LinkedIn, Slack and others (1200x630)
+    image: 'img/social-card.png',
     metadata: [
       {name: 'keywords', content: 'open source applicant tracking system, ATS, recruitment software, hiring platform, candidate tracking, interview management'},
       {name: 'author', content: 'OpenATS contributors'},
       {name: 'robots', content: 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1'},
       {property: 'og:site_name', content: 'OpenATS'},
       {property: 'og:type', content: 'website'},
-      {property: 'og:image:alt', content: 'OpenATS open-source hiring platform'},
+      {property: 'og:image:width', content: '1200'},
+      {property: 'og:image:height', content: '630'},
+      {property: 'og:image:alt', content: 'OpenATS, the open-source applicant tracking system, showing the hiring pipeline stages of a job'},
+      {name: 'twitter:image:alt', content: 'OpenATS, the open-source applicant tracking system, showing the hiring pipeline stages of a job'},
       {name: 'twitter:card', content: 'summary_large_image'},
       {name: 'theme-color', content: '#1f6870'},
     ],
@@ -102,64 +109,38 @@ const config: Config = {
         srcDark: 'img/brand/openats-logo-white.png',
       },
       items: [
+        {to: '/', label: 'Home', position: 'left', activeBaseRegex: '^/$'},
         {
           type: 'docSidebar',
           sidebarId: 'tutorialSidebar',
           position: 'left',
           label: 'Documentation',
-          className: 'navbar-docs-link',
         },
-        {
-          href: 'https://github.com/chamals3n4/OpenATS',
-          label: 'GitHub',
-          position: 'right',
-        },
+        // Hidden for now: the pages are kept as src/pages/_managed-hosting.tsx and _pricing.tsx,
+        // which Docusaurus does not build. Remove the underscore and these comments to bring them back.
+        // {to: '/managed-hosting', label: 'Managed Hosting', position: 'left'},
+        // {to: '/pricing', label: 'Pricing', position: 'left'},
+        {to: '/blog', label: 'Blog', position: 'left'},
+        {to: '/contact', label: 'Contact', position: 'left'},
+        {type: 'custom-githubStar', position: 'right'},
       ],
-    },
-    footer: {
-      style: 'dark',
-      links: [
-        {
-          title: 'Docs',
-          items: [
-            {
-              label: 'Get started',
-              to: '/docs/intro',
-            },
-          ],
-        },
-        {
-          title: 'Project',
-          items: [
-            {
-              label: 'GitHub',
-              href: 'https://github.com/chamals3n4/OpenATS',
-            },
-            {
-              label: 'Live demo',
-              href: 'https://demo.openats.dev',
-            },
-          ],
-        },
-        {
-          title: 'Resources',
-          items: [
-            {
-              label: 'Contributing',
-              href: 'https://github.com/chamals3n4/OpenATS/blob/main/CONTRIBUTING.md',
-            },
-            {
-              label: 'Apache 2.0 License',
-              href: 'https://github.com/chamals3n4/OpenATS/blob/main/LICENSE',
-            },
-          ],
-        },
-      ],
-      copyright: `Copyright © ${new Date().getFullYear()} OpenATS. Licensed under Apache 2.0.`,
     },
     prism: {
-      theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      // GitHub's theme with its bright cyan keys and pink strings swapped for the site's teal and a muted amber
+      theme: {
+        ...prismThemes.github,
+        styles: prismThemes.github.styles.map((s) => {
+          const color = {'#00a4db': '#1f6870', '#e3116c': '#b45309'}[s.style.color ?? ''];
+          return color ? {...s, style: {...s.style, color}} : s;
+        }),
+      },
+      // Dracula's colours on the site's neutral grey instead of its purple background
+      darkTheme: {
+        ...prismThemes.dracula,
+        plain: {...prismThemes.dracula.plain, backgroundColor: '#171717'},
+      },
+      // Languages the docs use that Docusaurus does not bundle (`sh` is an alias of bash)
+      additionalLanguages: ['bash', 'ini', 'http', 'sql', 'nginx'],
     },
   } satisfies Preset.ThemeConfig,
 };

@@ -5,7 +5,7 @@
   "description": "OpenATS monorepo root - orchestrates backend and frontend as a pnpm workspace",
   "packageManager": "pnpm@11.21.0",
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"pnpm --filter ./backend dev\" \"pnpm --filter ./frontend dev\"",
+    "dev": "concurrently -n backend,worker,frontend -c blue,magenta,green \"pnpm --filter ./backend dev\" \"pnpm --filter ./backend dev:worker\" \"pnpm --filter ./frontend dev\"",
     "dev:backend": "pnpm --filter ./backend dev",
     "dev:frontend": "pnpm --filter ./frontend dev",
     "build": "pnpm --filter ./backend build && pnpm --filter ./frontend build",
@@ -17,17 +17,12 @@
     "test:frontend": "pnpm --filter ./frontend test:run"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "@types/node": "^26.6.4",
-    "concurrently": "^9.0.0",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "concurrently": "^10.0.6",
     "typescript": "^5.9.3"
   },
   "engines": {
     "node": "22.x"
-  },
-  "pnpm": {
-    "overrides": {
-      "jose": "5.10.0"
-    }
   }
 }

@@ -7,9 +7,9 @@ import {
 } from "../modules/job/job.controller";
 import { getPublicCompany } from "../modules/company/company.controller";
 import { checkOrigins } from "../middlewares/allowedOrigins.middleware";
-import { getCustomQuestions } from "../modules/custom-question/custom-question.controller";
+import { getPublicCustomQuestions } from "../modules/custom-question/custom-question.controller";
 import { applyForJob } from "../modules/candidate/candidate.controller";
-import { uploadFile } from "../modules/upload/upload.controller";
+import { uploadPublicResume } from "../modules/upload/upload.controller";
 import {
   getAssessmentForCandidate,
   startAssessment,
@@ -17,19 +17,23 @@ import {
   completeAssessment,
 } from "../modules/assessment-execution/assessment-execution.controller";
 import {
+  getAssignmentForCandidate,
+  submitAssignment,
+} from "../modules/assignment/assignment.controller";
+import {
   acceptPublicOffer,
   declinePublicOffer,
   getPublicOfferByToken,
+  markPublicOfferViewed,
 } from "../modules/offer/offer.controller";
 import { db } from "../db";
-import { candidates, jobs, candidateInterviews, users } from "../db/schema";
-import { and, eq, ne } from "drizzle-orm";
+import { candidates, jobs, candidateInterviews } from "../db/schema";
+import { and, eq } from "drizzle-orm";
 import rateLimit from "express-rate-limit";
+import { LOGO_CONTENT_TYPES, localStorage } from "../shared/services/local-storage";
 import logger from "../utils/logger";
-import { mailService } from "../shared/services/mail.service";
-import { socketService } from "../shared/services/socket.service";
-import { integrationConnectionService } from "../shared/integrations/connection.service";
-import { getProviderClient } from "../shared/integrations/registry";
+import { completeInterviewBooking } from "../modules/interview/interview-confirm";
+import { getBusyRanges, isInterviewClash, overlapsBusy } from "../modules/interview/interview-slots";
 import { getErrorMessage } from "../utils/error.utils";
 
 const router: Router = Router();
@@ -86,6 +90,32 @@ const publicWriteLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
+/**
+ * Assessments are limited per link, not per IP address, so candidates sharing an office
+ * network do not use up each other's allowance. Saving answers has its own, larger budget:
+ * an answer is saved each time one is picked, and those saves must never be able to use up
+ * the requests needed to start or to submit.
+ */
+const assessmentKey = (req: Request) => `assessment:${String(req.params.token ?? "")}`;
+
+const assessmentAnswerLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: assessmentKey,
+  message: { error: "Too many requests. Please try again later." },
+});
+
+const assessmentActionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: assessmentKey,
+  message: { error: "Too many requests. Please try again later." },
+});
+
 const publicReadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -94,69 +124,73 @@ const publicReadLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
+// Logos when STORAGE is local (with R2 they come from the public bucket). Public like the bucket,
+// with no origin check, because emails show them too. The name is random and never reused, so
+// browsers may keep a logo for good.
+const fileLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+router.get("/files/logos/:name", fileLimiter, async (req, res) => {
+  try {
+    const name = String(req.params.name ?? "");
+    const bytes = process.env.STORAGE === "local" ? await localStorage.getLogo(name) : null;
+    if (!bytes) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const ext = name.slice(name.lastIndexOf(".") + 1);
+    res.setHeader("Content-Type", LOGO_CONTENT_TYPES[ext] ?? "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    // An SVG can hold script, so it is only ever a download, as with the bucket.
+    res.setHeader("Content-Disposition", ext === "svg" ? "attachment" : "inline");
+    // Shown on the careers page, which is another origin than the API.
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.status(200).send(bytes);
+  } catch (error) {
+    logger.error(`Failed to serve a logo: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
 router.get("/company", checkOrigins, getPublicCompany);
 router.get("/jobs", checkOrigins, listPublishedCareersJobs);
 router.get("/jobs/:id", checkOrigins, getPublicJobById);
-router.get("/jobs/:jobId/questions", checkOrigins, getCustomQuestions);
+router.get("/jobs/:jobId/questions", checkOrigins, getPublicCustomQuestions);
 router.post("/jobs/:jobId/apply", checkOrigins, applyLimiter, applyForJob);
 router.post(
   "/upload/resume",
   checkOrigins,
   publicWriteLimiter,
   handleResumeUpload,
-  uploadFile,
+  uploadPublicResume,
 );
 
 // assessments for candidates ( token based)
 router.get("/assessment/:token", publicReadLimiter, getAssessmentForCandidate);
-router.post("/assessment/:token/start", publicWriteLimiter, startAssessment);
+router.post("/assessment/:token/start", assessmentActionLimiter, startAssessment);
 router.post(
   "/assessment/:token/answer",
-  publicWriteLimiter,
+  assessmentAnswerLimiter,
   submitAssessmentAnswer,
 );
 router.post(
   "/assessment/:token/complete",
-  publicWriteLimiter,
+  assessmentActionLimiter,
   completeAssessment,
 );
 
+// take-home assignments for candidates (token based, limited per link like assessments)
+router.get("/assignment/:token", publicReadLimiter, getAssignmentForCandidate);
+router.post("/assignment/:token/submit", assessmentActionLimiter, submitAssignment);
+
 // public offer portal (token based)
 router.get("/offers/:token", publicReadLimiter, getPublicOfferByToken);
+router.post("/offers/:token/viewed", publicWriteLimiter, markPublicOfferViewed);
 router.post("/offers/:token/accept", publicWriteLimiter, acceptPublicOffer);
 router.post("/offers/:token/decline", publicWriteLimiter, declinePublicOffer);
-
-// Times already taken by other confirmed interviews (same interviewer, or any if unassigned)
-async function getTakenTimes(
-  excludeInterviewId: number,
-  interviewerId: number | null,
-): Promise<Set<number>> {
-  const rows = await db
-    .select({
-      scheduledAt: candidateInterviews.scheduledAt,
-      interviewerId: candidateInterviews.interviewerId,
-    })
-    .from(candidateInterviews)
-    .where(
-      and(
-        eq(candidateInterviews.status, "scheduled"),
-        ne(candidateInterviews.id, excludeInterviewId),
-      ),
-    );
-  const taken = new Set<number>();
-  for (const r of rows) {
-    if (!r.scheduledAt) continue;
-    if (
-      interviewerId != null &&
-      r.interviewerId != null &&
-      r.interviewerId !== interviewerId
-    ) {
-      continue;
-    }
-    taken.add(r.scheduledAt.getTime());
-  }
-  return taken;
-}
 
 // Public interview slot selection (no auth)
 router.get("/interview/:token", publicReadLimiter, async (req, res) => {
@@ -168,6 +202,7 @@ router.get("/interview/:token", publicReadLimiter, async (req, res) => {
         eventType: candidateInterviews.eventType,
         meetingUrl: candidateInterviews.meetingUrl,
         bodyText: candidateInterviews.bodyText,
+        durationMinutes: candidateInterviews.durationMinutes,
         timeSlots: candidateInterviews.timeSlots,
         status: candidateInterviews.status,
         tokenExpiresAt: candidateInterviews.tokenExpiresAt,
@@ -198,14 +233,15 @@ router.get("/interview/:token", publicReadLimiter, async (req, res) => {
       return;
     }
 
-    const takenTimes = await getTakenTimes(iv.id, iv.interviewerId);
+    const busy = await getBusyRanges(iv.id, iv.interviewerId);
     const slots = (iv.timeSlots ?? []) as Array<{
       datetime: string;
       selected: boolean;
     }>;
+    // Taken when any part of the interview would overlap another one, not only on an equal start.
     const timeSlots = slots.map((s) => ({
       ...s,
-      taken: takenTimes.has(new Date(s.datetime).getTime()),
+      taken: overlapsBusy(new Date(s.datetime), iv.durationMinutes, busy),
     }));
 
     const { interviewerId: _interviewerId, ...publicIv } = iv;
@@ -282,34 +318,48 @@ router.patch(
         return;
       }
 
-      const takenTimes = await getTakenTimes(iv.id, iv.interviewerId);
-      if (takenTimes.has(scheduledAt.getTime())) {
+      const slotTaken = () =>
         res.status(409).json({
           error:
             "This time slot is no longer available. Please pick a different time.",
           code: "SLOT_TAKEN",
         });
+
+      const busy = await getBusyRanges(iv.id, iv.interviewerId);
+      if (overlapsBusy(scheduledAt, iv.durationMinutes, busy)) {
+        slotTaken();
         return;
       }
 
       selectedSlot.selected = true;
 
-      // Claim first so concurrent confirms can't double-book
-      const claimed = await db
-        .update(candidateInterviews)
-        .set({
-          timeSlots: slots,
-          status: "scheduled",
-          scheduledAt,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(candidateInterviews.id, iv.id),
-            eq(candidateInterviews.status, "pending_schedule"),
-          ),
-        )
-        .returning({ id: candidateInterviews.id });
+      // The check above and this write are two steps, so two candidates could both pass the
+      // check for the same time. The database constraint lets only one of the writes through;
+      // the other is told the slot is taken, like anyone who was a little later.
+      let claimed: Array<{ id: number }>;
+      try {
+        claimed = await db
+          .update(candidateInterviews)
+          .set({
+            timeSlots: slots,
+            status: "scheduled",
+            scheduledAt,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(candidateInterviews.id, iv.id),
+              eq(candidateInterviews.status, "pending_schedule"),
+            ),
+          )
+          .returning({ id: candidateInterviews.id });
+      } catch (error) {
+        if (isInterviewClash(error)) {
+          slotTaken();
+          return;
+        }
+        throw error;
+      }
 
       if (claimed.length === 0) {
         res
@@ -318,121 +368,7 @@ router.patch(
         return;
       }
 
-      const [candidate] = await db
-        .select({
-          email: candidates.email,
-          firstName: candidates.firstName,
-          lastName: candidates.lastName,
-        })
-        .from(candidates)
-        .where(eq(candidates.id, iv.candidateId));
-
-      const interviewer = iv.interviewerId
-        ? (
-            await db
-              .select({ email: users.email })
-              .from(users)
-              .where(eq(users.id, iv.interviewerId))
-          )[0]
-        : undefined;
-
-      let meetingUrl = iv.meetingUrl;
-      let providerMeetingId: string | null = null;
-      if (iv.meetingProvider && iv.interviewerId) {
-        try {
-          const accessToken =
-            await integrationConnectionService.getValidAccessToken(
-              iv.interviewerId,
-            );
-          if (accessToken) {
-            const meeting = await getProviderClient(
-              iv.meetingProvider,
-            ).createMeeting(accessToken, {
-              eventName: iv.eventName ?? "Interview",
-              scheduledAt,
-              durationMinutes: 60,
-              attendeeEmails: candidate ? [candidate.email] : [],
-            });
-            meetingUrl = meeting.meetingUrl;
-            providerMeetingId = meeting.providerMeetingId ?? null;
-          } else {
-            logger.warn(
-              `Interview ${iv.id}: interviewer ${iv.interviewerId} no longer has a valid ${iv.meetingProvider} connection — confirmation will go out without an auto-generated link`,
-            );
-          }
-        } catch (err) {
-          // Non-fatal — keep whatever meetingUrl was already on the row (manual or none)
-          logger.error(
-            `Failed to auto-generate meeting link for interview ${iv.id}: ${getErrorMessage(err)}`,
-          );
-        }
-      }
-      if ((iv.eventType ?? "virtual") === "virtual" && !meetingUrl) {
-        logger.warn(
-          `Interview ${iv.id} confirmed as virtual but has no meeting link — recruiter attention needed`,
-        );
-      }
-
-      let googleEventId: string | null = null;
-      if (candidate && iv.eventName) {
-        try {
-          const gcal = await import("../shared/services/google-calendar.service");
-          googleEventId = await gcal.createCalendarEvent({
-            interviewId: iv.id,
-            candidateName: `${candidate.firstName} ${candidate.lastName}`,
-            jobTitle: "",
-            stageName: "",
-            scheduledAt,
-            durationMinutes: 60,
-            notes: iv.bodyText ?? null,
-            attendeeEmails: [
-              candidate.email,
-              ...(interviewer ? [interviewer.email] : []),
-            ],
-            meetingUrl,
-          });
-        } catch (err) {
-          logger.error(
-            `Failed to create calendar event for interview ${iv.id}: ${getErrorMessage(err)}`,
-          );
-        }
-      }
-
-      if (meetingUrl !== iv.meetingUrl || googleEventId || providerMeetingId) {
-        await db
-          .update(candidateInterviews)
-          .set({
-            meetingUrl,
-            ...(googleEventId ? { googleEventId } : {}),
-            ...(providerMeetingId ? { providerMeetingId } : {}),
-            updatedAt: new Date(),
-          })
-          .where(eq(candidateInterviews.id, iv.id));
-      }
-
-      if (candidate && iv.eventName) {
-        mailService
-          .sendInterviewConfirmationEmail(
-            candidate.email,
-            `${candidate.firstName} ${candidate.lastName}`,
-            iv.eventName,
-            iv.eventType ?? "virtual",
-            scheduledAt,
-            60,
-            meetingUrl,
-            iv.location ?? null,
-          )
-          .catch((err: unknown) => {
-            logger.error(
-              `Failed to send confirmation email for interview ${iv.id}: ${getErrorMessage(err)}`,
-            );
-          });
-      }
-
-      socketService.notifyInterviewChanged({
-        interviewId: iv.id,
-        candidateId: iv.candidateId,
-      });
+      await completeInterviewBooking(iv, scheduledAt);
 
       res.status(200).json({ data: { confirmed: true, slot: selectedSlot } });
     } catch (e) {

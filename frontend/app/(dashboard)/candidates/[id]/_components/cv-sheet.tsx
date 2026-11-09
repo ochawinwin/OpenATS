@@ -24,8 +24,7 @@ export function CvSheet({ open, onOpenChange, candidate }: CvSheetProps) {
       <SheetContent
         side="right"
         showCloseButton={false}
-        // About one A4 (794px) or Legal (816px) page. The sheet sets its own width through the
-        // data-side selector, so that is the one that has to be overridden.
+        // About one A4 page wide
         className="gap-0 border-slate-200 p-0 data-[side=right]:w-[min(840px,100vw)] sm:max-w-none dark:border-neutral-800"
       >
         <SheetHeader className="flex-row items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-neutral-800">
@@ -33,7 +32,7 @@ export function CvSheet({ open, onOpenChange, candidate }: CvSheetProps) {
             {candidate.firstName} {candidate.lastName} CV
           </SheetTitle>
           <div className="flex shrink-0 items-center gap-2">
-          {candidate.resumeUrl && (
+          {candidate.hasResume && (
             <Button
               render={
                 <a
@@ -59,7 +58,7 @@ export function CvSheet({ open, onOpenChange, candidate }: CvSheetProps) {
           </Button>
           </div>
         </SheetHeader>
-        {candidate.resumeUrl ? (
+        {candidate.hasResume ? (
           <ResumeScrollView candidateId={candidate.id} />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">

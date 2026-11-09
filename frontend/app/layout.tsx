@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
 import { Changa_One, Geist_Mono, Google_Sans } from "next/font/google";
-import { AsgardeoProvider } from "@asgardeo/nextjs/server";
 import "./globals.css";
 
-// Variable font (wght 400-700). next/font self-hosts it at build time, so there is
-// no request to fonts.googleapis.com at runtime.
+// Self hosted by next/font
 const googleSans = Google_Sans({
   subsets: ["latin", "latin-ext"],
   variable: "--font-google-sans",
   display: "swap",
+  // Skip the fallback adjustment, next/font can't do it for this font
+  adjustFontFallback: false,
+  fallback: ["system-ui", "Segoe UI", "Roboto", "Arial", "sans-serif"],
 });
 const changaOne = Changa_One({
   subsets: ["latin"],
@@ -24,12 +25,14 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "OpenATS",
   description: "Open Source Applicant Tracking System",
+  icons: { icon: "/icon-light.png" },
 };
 
 export const dynamic = "force-dynamic";
 
 import { ThemeProvider } from "@/components/providers/theme-provider";
 import { ThemeInitializer } from "@/components/theme/theme-initializer";
+import { runtimeConfigScript } from "@/lib/api-url";
 
 export default function RootLayout({
   children,
@@ -42,6 +45,10 @@ export default function RootLayout({
       className={`${googleSans.variable} ${changaOne.variable}`}
       suppressHydrationWarning
     >
+      <head>
+        {/* The API address for the browser, read now rather than when the app was built */}
+        <script dangerouslySetInnerHTML={{ __html: runtimeConfigScript() }} />
+      </head>
       <body
         className={`${geistMono.variable} antialiased overflow-x-hidden`}
       >
@@ -52,7 +59,7 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <ThemeInitializer />
-          <AsgardeoProvider>{children}</AsgardeoProvider>
+          {children}
         </ThemeProvider>
       </body>
     </html>

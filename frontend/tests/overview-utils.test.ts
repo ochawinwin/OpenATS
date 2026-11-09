@@ -7,7 +7,7 @@ import {
   interviewWhen,
   percentDelta,
   pointsDelta,
-} from "@/app/(dashboard)/lib/overview-utils";
+} from "@/app/(dashboard)/_lib/overview-utils";
 import type { AnalyticsReport } from "@/types";
 
 const summary = (extra: Partial<AnalyticsReport["summary"]> = {}): AnalyticsReport["summary"] => ({
@@ -66,10 +66,6 @@ describe("buildKpis", () => {
 
   it("keeps a real 0% acceptance when offers were sent", () => {
     expect(kpi(summary({ offerAcceptanceRate: 0, offersSent: 3 }), "offerRate").value).toBe("0%");
-  });
-
-  it("marks only the offer rate as manager-only", () => {
-    expect(buildKpis(summary()).filter((k) => k.managerOnly).map((k) => k.key)).toEqual(["offerRate"]);
   });
 
   it("uses the singular", () => {

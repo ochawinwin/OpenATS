@@ -3,21 +3,20 @@
 import * as React from "react";
 import {
   Home01Icon,
-  Briefcase01Icon,
-  UserGroupIcon,
-  SearchList02Icon,
+  BriefcaseBusinessIcon,
+  UsersRoundIcon,
   Settings02Icon,
-  ArtboardToolIcon,
-  Quiz02Icon,
-  Agreement02Icon,
-  Calendar02Icon,
+  Layout03Icon,
+  Quiz03Icon,
+  TelegramIcon,
+  CoPresentIcon,
 } from "@hugeicons/core-free-icons";
 
 import { usePathname } from "next/navigation";
 
 import { NavMain } from "@/components/layout/nav-main";
 import { Sidebar, SidebarContent } from "@/components/ui/sidebar";
-import { useCurrentUser } from "@/hooks/queries/use-user";
+import { useRole } from "@/hooks/use-role";
 
 const navMainData = [
   {
@@ -28,32 +27,32 @@ const navMainData = [
   {
     title: "Manage Jobs",
     url: "/jobs",
-    icon: Briefcase01Icon,
+    icon: BriefcaseBusinessIcon,
   },
   {
     title: "Candidates",
     url: "/candidates",
-    icon: UserGroupIcon,
+    icon: UsersRoundIcon,
   },
   {
     title: "Interviews",
     url: "/interviews",
-    icon: Calendar02Icon,
+    icon: CoPresentIcon,
   },
   {
     title: "Assessments",
     url: "/assessments",
-    icon: Quiz02Icon,
+    icon: Quiz03Icon,
   },
   {
     title: "Manage Offers",
     url: "/offers",
-    icon: Agreement02Icon,
+    icon: TelegramIcon,
   },
   {
     title: "Templates",
     url: "/templates",
-    icon: ArtboardToolIcon,
+    icon: Layout03Icon,
   },
   {
     title: "Settings",
@@ -86,10 +85,7 @@ const navMainData = [
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
-  const { data: currentUserRes } = useCurrentUser();
-  const role = currentUserRes?.data?.role;
-  const isSuperAdmin = role === "super_admin";
-  const isManager = role === "super_admin" || role === "hiring_manager";
+  const { isSuperAdmin, isManager } = useRole();
 
   const items = navMainData
     .filter((item) => {

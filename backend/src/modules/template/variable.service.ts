@@ -2,8 +2,14 @@ import { eq } from "drizzle-orm";
 import { db } from "../../db";
 import { candidates, jobs, departments, company } from "../../db/schema";
 import { TemplateContext } from "./template-engine.service";
+import { frontendUrl } from "../../utils/frontend-url";
 
 export const variableService = {
+  /**
+   * What is known about any candidate. The offer details (salary, start date and so on) are
+   * left out on purpose: outside an offer they have no value, and a made-up one would be
+   * sent to the candidate.
+   */
   async getContextForCandidate(candidateId: number): Promise<TemplateContext> {
     const [result] = await db
       .select({
@@ -24,12 +30,7 @@ export const variableService = {
       candidate_name: `${result.candidate.firstName} ${result.candidate.lastName}`,
       job_title: result.job.title,
       company_name: result.company.name,
-      start_date: "TBD",
-      salary: "TBD",
-      currency: "",
       employment_type: result.job.employmentType,
-      reporting_manager: "TBD",
-      benefits: "TBD",
     };
   },
 
@@ -47,10 +48,7 @@ export const variableService = {
   ): Promise<TemplateContext> {
     const baseContext = await this.getContextForCandidate(candidateId);
 
-    const frontendBase = (process.env.FRONTEND_URL ?? "http://localhost:3000").replace(
-      /\/$/,
-      "",
-    );
+    const frontendBase = frontendUrl();
 
     return {
       ...baseContext,
@@ -61,7 +59,7 @@ export const variableService = {
       reporting_manager: offerData.reportingManager ?? "TBD",
       benefits: offerData.benefits ?? "TBD",
       offer_review_url: offerData.reviewToken
-        ? `${frontendBase}/offers/${offerData.reviewToken}`
+        ? `${frontendBase}/offer/${offerData.reviewToken}`
         : "",
     };
   },

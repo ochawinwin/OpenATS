@@ -1,14 +1,7 @@
+import { serverApiUrl } from "@/lib/api-url";
 import { NextResponse } from "next/server";
-import { asgardeo } from "@asgardeo/nextjs/server";
+import { getApiToken } from "@/lib/auth/session";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-
-async function getAccessToken() {
-  const client = await asgardeo();
-  const sessionId = await client.getSessionId();
-  if (!sessionId) throw new Error("Unauthorized");
-  return client.getAccessToken(sessionId);
-}
 
 export async function PATCH(
   req: Request,
@@ -23,10 +16,13 @@ export async function PATCH(
       );
     }
 
-    const token = await getAccessToken();
+    const token = await getApiToken();
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const formData = await req.formData();
 
-    const res = await fetch(`${API_BASE_URL}/api/candidates/${id}`, {
+    const res = await fetch(`${serverApiUrl()}/api/candidates/${id}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,

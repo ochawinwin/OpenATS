@@ -10,6 +10,7 @@ import {
   File01Icon,
 } from "@hugeicons/core-free-icons";
 import { Badge } from "@/components/ui/badge";
+import { ScoreBadge } from "@/components/score-badge";
 import { RowDeleteButton } from "@/components/table/row-actions";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -20,7 +21,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatDate, OFFER_STATUS_STYLES } from "./constants";
+import { OFFER_STATUS_STYLES } from "./constants";
+import { formatDate } from "@/lib/format";
 import { useIsManager } from "@/hooks/use-role";
 import type { useMoveCandidateStage } from "@/hooks/queries/use-candidates";
 import type { CandidateDetail, Offer, PipelineStage } from "@/types";
@@ -37,6 +39,8 @@ interface CandidateHeaderProps {
   onCancelStageChange: () => void;
   onSaveStageChange: () => void;
   onViewCv: () => void;
+  /** Opens the Scores tab. */
+  onViewScores?: () => void;
   onClose: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -54,6 +58,7 @@ export function CandidateHeader({
   onCancelStageChange,
   onSaveStageChange,
   onViewCv,
+  onViewScores,
   onClose,
   onEdit,
   onDelete,
@@ -77,7 +82,7 @@ export function CandidateHeader({
       <div className="px-4 py-4 sm:px-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-bold leading-tight text-slate-950 dark:text-neutral-50">
+            <h1 className="truncate text-2xl font-bold leading-tight text-slate-950 dark:text-neutral-50">
               {candidate.firstName} {candidate.lastName}
             </h1>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-sm font-medium text-slate-500 dark:text-neutral-400">
@@ -99,6 +104,23 @@ export function CandidateHeader({
               >
                 {candidate.status}
               </Badge>
+              <button
+                type="button"
+                onClick={onViewScores}
+                disabled={!onViewScores}
+                title="See the score breakdown"
+                className="cursor-pointer rounded-md disabled:cursor-default"
+              >
+                <ScoreBadge
+                  size="full"
+                  total={candidate.totalScore}
+                  scoredParts={candidate.scoredParts}
+                  weightedParts={candidate.weightedParts}
+                  knockedOut={candidate.knockedOut}
+                  assessmentPassed={candidate.assessmentPassed}
+                  assessmentExpired={candidate.assessmentExpired}
+                />
+              </button>
               {offer && (
                 <Badge
                   className={`${offerStyle?.bg} ${offerStyle?.text} rounded-md border-none px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider shadow-none`}
@@ -108,7 +130,7 @@ export function CandidateHeader({
               )}
             </div>
 
-            <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-600 dark:text-neutral-300">
+            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-600 dark:text-neutral-300">
               <a
                 href={`mailto:${candidate.email}`}
                 className="inline-flex min-w-0 items-center gap-2 font-medium hover:text-[var(--theme-color)]"
@@ -139,7 +161,7 @@ export function CandidateHeader({
           <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
             <Button
               variant="cancel"
-              disabled={!candidate.resumeUrl}
+              disabled={!candidate.hasResume}
               onClick={onViewCv}
               className="h-9 gap-2 px-3.5 text-sm"
             >

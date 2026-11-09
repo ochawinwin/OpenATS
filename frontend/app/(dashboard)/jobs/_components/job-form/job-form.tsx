@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type KeyboardEvent } from "react";
+import { UnsavedChangesGuard } from "@/components/guards/unsaved-changes-guard";
 import type { Department } from "@/types";
 import { JobFormHeader } from "./job-form-header";
 import { JobBasicInfo } from "./job-basic-info";
@@ -25,10 +26,7 @@ interface JobFormProps {
   onCancel: () => void;
 }
 
-/**
- * The single job form, shared by the create and edit pages. It owns the field
- * state; the pages own data loading and what happens on submit.
- */
+/** Job form for create and edit */
 export function JobForm({
   mode,
   initialValues = EMPTY_JOB_FORM_VALUES,
@@ -51,12 +49,15 @@ export function JobForm({
     setSkillInput("");
   };
 
+  const isDirty = JSON.stringify(values) !== JSON.stringify(initialValues);
+
   const handleSubmit = () => {
     if (isValidJobForm(values)) onSubmit(values);
   };
 
   return (
     <div className="px-14 py-10 pb-20 max-w-5xl">
+      <UnsavedChangesGuard when={isDirty} />
       <JobFormHeader
         mode={mode}
         isActive={values.isActive}

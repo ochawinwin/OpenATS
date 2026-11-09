@@ -1,9 +1,12 @@
 ---
 sidebar_position: 7
-title: Offers and hiring decisions
+title: Send an Offer
+sidebar_label: Send an Offer
+description: Prepare and send a job offer in OpenATS, generate the offer letter from a template, track when it is viewed and answered, and mark the candidate as hired.
+keywords: [job offer letter, send an offer, offer tracking, offer acceptance, mark as hired]
 ---
 
-# Offers and hiring decisions
+# Send an Offer
 
 When the team decides to hire a candidate, OpenATS helps you prepare an offer, send it through a private link, and record the candidate's response.
 
@@ -42,10 +45,11 @@ If an offer was not created automatically, open the candidate's **Offer** tab an
 5. Enter the **Salary** and **Currency**.
 6. Select the **Employment Type**.
 7. Enter the **Start Date**.
-8. Enter the **Reporting Manager**.
-9. Add the **Benefits** included in the offer.
-10. Enter or generate the **Offer Letter** content.
-11. Select **Save Draft** while the offer is still being reviewed.
+8. Optionally set **Respond by**, the last day the candidate can answer. The offer stays open for the whole of that day. Leave it empty for an offer with no end date.
+9. Enter the **Reporting Manager**.
+10. Add the **Benefits** included in the offer.
+11. Enter or generate the **Offer Letter** content.
+12. Select **Save Draft** while the offer is still being reviewed.
 
 ![Edit a draft offer with a template](/content/offer/editing-draft-offer-with-selectin-template.png)
 
@@ -67,10 +71,10 @@ An offer normally moves through these states:
 
 - **Draft**: created but not sent.
 - **Sent**: sent and waiting for the candidate.
-- **Viewed**: the candidate opened the private link.
+- **Viewed**: the offer was shown on the candidate's screen. Opening the link is not enough, because email security scanners open links automatically; the status changes when the page is actually displayed in a browser.
 - **Accepted**: the candidate accepted the offer.
 - **Declined**: the candidate declined the offer.
-- **Expired**: the offer link is no longer valid.
+- **Expired**: the **Respond by** date passed with no answer. The candidate can still open the link and read the offer, but can no longer accept or decline it.
 
 ## Candidate reviews the offer
 
@@ -78,7 +82,15 @@ The candidate opens the private link from the email and reviews the salary, empl
 
 ![Candidate offer acceptance screen](/content/offer/offer-accept-screen.png)
 
+When a **Respond by** date is set, the candidate sees it above the buttons, in their own time zone.
+
 After the candidate responds, the status is updated in OpenATS and the hiring team can see the response from the candidate profile or **Manage Offers**.
+
+An offer can be answered once. If the candidate presses a button twice, or accepts in one tab and declines in another, only the first answer counts.
+
+### After an answer, the offer is locked
+
+Once an offer is **Accepted**, **Declined** or **Expired**, its salary, dates, benefits and letter can no longer be edited. They are the record of what the candidate was shown when they answered. To change the terms after that, agree them with the candidate outside OpenATS and record the outcome in the candidate's notes.
 
 ## Mark the candidate as hired
 
@@ -93,4 +105,16 @@ This updates the candidate's status to hired and records the final action in the
 ![Mark an accepted candidate as hired](/content/offer/after-accept-markashired.png)
 
 If the candidate declines, keep the response in the offer record and move the candidate to the appropriate closed stage. Do not delete the candidate if you need to preserve the recruitment history.
+
+## See every offer
+
+**Manage Offers** shows offers across all your jobs. Filter by position or status to see who you're still waiting to hear from.
+
+{/* SCREENSHOT: offers/offer-list.png - The Manage Offers list with offers in different statuses */}
+
+Interviewers can't see this page.
+
+## Next step
+
+Don't leave your other candidates waiting. [Let them know the outcome](./rejecting-candidates).
 

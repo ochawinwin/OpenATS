@@ -1,4 +1,5 @@
 import { ContentBlock, TemplateBody } from "../../db/schema/templates";
+import { escapeHtml } from "../../shared/services/email-layout";
 
 export interface TemplateContext {
   candidate_name?: string;
@@ -11,26 +12,6 @@ export interface TemplateContext {
   [key: string]: string | number | undefined;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-// Variable values include data a candidate typed into the public application
-// form (e.g. their name). Anything interpolated into HTML must be escaped, or
-// a crafted name would execute in the recruiter's dashboard.
-function escapeContext(context: TemplateContext): TemplateContext {
-  const escaped: TemplateContext = {};
-  for (const [key, value] of Object.entries(context)) {
-    escaped[key] = typeof value === "string" ? escapeHtml(value) : value;
-  }
-  return escaped;
-}
-
 export const templateEngineService = {
 
   replaceVariables(text: string, context: TemplateContext): string {
@@ -40,6 +21,24 @@ export const templateEngineService = {
       const value = context[variable.trim()];
       return value !== undefined ? String(value) : match;
     });
+  },
+
+  /** The {{variables}} used in a template that the context has no value for. */
+  missingVariables(subject: string, body: TemplateBody, context: TemplateContext): string[] {
+    const texts = [
+      subject,
+      ...(typeof body === "string"
+        ? [body]
+        : body.map((block) => ("content" in block && typeof block.content === "string" ? block.content : ""))),
+    ];
+    const missing = new Set<string>();
+    for (const text of texts) {
+      for (const match of text.matchAll(/\{\{(.+?)\}\}/g)) {
+        const name = match[1]!.trim();
+        if (context[name] === undefined) missing.add(name);
+      }
+    }
+    return [...missing];
   },
 
   renderJSON(body: TemplateBody, context: TemplateContext): TemplateBody {
@@ -71,11 +70,14 @@ export const templateEngineService = {
     });
   },
 
-  renderHTML(body: TemplateBody, rawContext: TemplateContext): string {
-    const context = escapeContext(rawContext);
-
+  renderHTML(body: TemplateBody, context: TemplateContext): string {
     if (typeof body === "string") {
-      return this.replaceVariables(body, context);
+      // The body is HTML, and some values were typed by the candidate, so they are escaped.
+      const escaped: TemplateContext = {};
+      for (const [key, value] of Object.entries(context)) {
+        escaped[key] = value === undefined ? undefined : escapeHtml(String(value));
+      }
+      return this.replaceVariables(body, escaped);
     }
 
     const processedBlocks = this.renderJSON(body, context) as ContentBlock[];

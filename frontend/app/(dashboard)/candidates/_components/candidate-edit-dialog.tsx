@@ -1,5 +1,6 @@
 "use client";
 
+import { toast } from "sonner";
 import {
   Dialog,
   DialogClose,
@@ -11,41 +12,78 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { useState } from "react";
+import { useUpdateCandidateBasicDetails } from "@/hooks/queries/use-candidates";
 import type { Candidate } from "@/types";
-import type { CandidateFormData } from "../lib/candidate-types";
+import {
+  buildUpdateFormData,
+  candidateToFormData,
+  type CandidateFormData,
+} from "../_lib/candidate-types";
 
 const fieldClassName =
   "h-10! rounded-lg border border-slate-300 bg-gray-100 shadow-none placeholder:text-slate-400 focus-visible:!border-slate-500 focus-visible:ring-0 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus-visible:!border-neutral-400";
 
 interface CandidateEditDialogProps {
+  // Candidate to edit, null when closed
   candidate: Candidate | null;
-  formData: CandidateFormData;
-  onFormChange: (formData: CandidateFormData) => void;
-  isOpen: boolean;
   onClose: () => void;
-  onConfirm: () => void;
-  isPending: boolean;
 }
 
-export function CandidateEditDialog({
+export function CandidateEditDialog({ candidate, onClose }: CandidateEditDialogProps) {
+  const updateMutation = useUpdateCandidateBasicDetails();
+
+  return (
+    <Dialog
+      open={!!candidate}
+      onOpenChange={(o) => !o && !updateMutation.isPending && onClose()}
+    >
+      <DialogContent className="max-w-lg rounded-xl border-slate-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-xl">
+        {/* Keyed so the fields reset for each candidate */}
+        {candidate && (
+          <EditForm
+            key={candidate.id}
+            candidate={candidate}
+            isPending={updateMutation.isPending}
+            onSave={(formData) =>
+              updateMutation.mutate(
+                { id: candidate.id, formData: buildUpdateFormData(formData) },
+                {
+                  onSuccess: () => {
+                    toast.success("Candidate updated");
+                    onClose();
+                  },
+                  onError: (error) => toast.error(error.message || "Failed to update the candidate"),
+                },
+              )
+            }
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditForm({
   candidate,
-  formData,
-  onFormChange,
-  isOpen,
-  onClose,
-  onConfirm,
   isPending,
-}: CandidateEditDialogProps) {
+  onSave,
+}: {
+  candidate: Candidate;
+  isPending: boolean;
+  onSave: (formData: CandidateFormData) => void;
+}) {
+  const [formData, setFormData] = useState(() => candidateToFormData(candidate));
+
   const updateField = <K extends keyof CandidateFormData>(
     field: K,
     value: CandidateFormData[K],
   ) => {
-    onFormChange({ ...formData, [field]: value });
+    setFormData((current) => ({ ...current, [field]: value }));
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg rounded-xl border-slate-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 shadow-xl">
+    <>
         <DialogHeader>
           <DialogTitle className="text-[17px] font-semibold text-slate-900 dark:text-neutral-100">
             Edit Candidate
@@ -103,9 +141,9 @@ export function CandidateEditDialog({
               <p className="text-[13px] font-medium text-slate-600 dark:text-neutral-400">
                 Upload new CV (PDF)
               </p>
-              {candidate?.resumeUrl ? (
+              {candidate.hasResume ? (
                 <a
-                  href={candidate.resumeUrl}
+                  href={`/api/candidates/${candidate.id}/resume`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center text-[12px] font-medium text-theme hover:underline whitespace-nowrap"
@@ -138,7 +176,7 @@ export function CandidateEditDialog({
             Cancel
           </DialogClose>
           <Button
-            onClick={onConfirm}
+            onClick={() => onSave(formData)}
             disabled={isPending}
             className="h-9 cursor-pointer gap-2 rounded-md border-none px-4 text-sm font-medium text-white shadow-none"
             style={{ backgroundColor: "var(--theme-color)" }}
@@ -147,7 +185,6 @@ export function CandidateEditDialog({
             {isPending ? "Saving" : "Save changes"}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

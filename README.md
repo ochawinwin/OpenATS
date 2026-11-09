@@ -1,11 +1,9 @@
-<p align="center">
+<h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./frontend/public/assets/openats-logo-white.png">
-    <img src="./frontend/public/assets/openats-logo.png" alt="OpenATS logo" width="80">
+    <source media="(prefers-color-scheme: dark)" srcset="./frontend/public/assets/openats-readme-white.png">
+    <img src="./frontend/public/assets/openats-readme-black.png" alt="OpenATS logo" width="240">
   </picture>
-</p>
-
-<h1 align="center">OpenATS</h1>
+</h1>
 
 <p align="center">
   <strong>An open-source hiring platform to streamline recruitment and hire faster.</strong>
@@ -13,9 +11,9 @@
 
 <p align="center">
   <a href="https://demo.openats.dev"><strong>Live demo</strong></a> ·
-  <a href="#key-features"><strong>Features</strong></a> ·
-  <a href="#the-stack"><strong>Stack</strong></a> ·
-  <a href="#quick-start"><strong>Quick start</strong></a> ·
+  <a href="#features"><strong>Features</strong></a> ·
+  <a href="#tech-stack"><strong>Tech stack</strong></a> ·
+  <a href="#getting-started"><strong>Getting started</strong></a> ·
   <a href="#configuration"><strong>Configuration</strong></a> ·
   <a href="./CONTRIBUTING.md"><strong>Contributing</strong></a>
 </p>
@@ -29,155 +27,115 @@
 
 ---
 
-## What this is
+OpenATS is an open-source applicant tracking system for organizations that want to run hiring in
+one clear, shared workspace. It replaces disconnected spreadsheets, inboxes, and point tools with a
+process that follows a candidate from an open role through interview and final decision.
 
-Recruiting often means juggling spreadsheets, inboxes, and a handful of disconnected
-tools. OpenATS brings job creation, candidate tracking, interviews, and hiring
-decisions into one workspace teams can set up as their own internal hiring platform.
+## Features
 
-Many recruitment tools are hard to customize and expensive to scale. OpenATS is a
-flexible open-source alternative: use it as a ready-to-go hiring platform, or as the
-foundation for building your own internal recruitment system - with full ownership of
-the code, the data, and the workflow, instead of adapting your process to fit someone
-else's software.
+- **Jobs and careers page**: create jobs with departments, salary and custom application
+  questions, and publish them on a built-in careers page or embed them on your own website.
+- **Candidate pipeline**: move candidates through your own hiring stages on a drag and drop
+  board, with filters, bulk actions and a full stage history.
+- **CV search**: the text of every uploaded CV is read on your server, so you can search across
+  all CVs and see where the words matched.
+- **Scoring**: each job sets how much application answers, assessments, ratings and interviews
+  count, and every candidate gets a total score from them.
+- **Assessments**: build tests with choice and written questions, send them automatically at a
+  stage, and grade written answers.
+- **Interviews**: schedule interviews, let candidates pick a time from the slots you offer, add
+  them to the interviewer's Google Calendar with a Meet link, and collect scorecards.
+- **Offers**: write offer letters from templates, send them, and let candidates accept or
+  decline online before the offer expires.
+- **Emails**: email candidates from templates, and reword the emails OpenATS sends by itself.
+- **Team collaboration**: a private discussion for each job's hiring team, star ratings and
+  shared notes.
+- **Roles and access**: super admins, hiring managers and interviewers, with interviewers seeing
+  only the jobs they are on.
+- **Optional AI notes**: turn on Gemini to get a summary, strengths and gaps for each CV. It is
+  off by default and never part of the score.
 
-OpenATS provides:
+## Tech stack
 
-- Full ownership through open-source software
-- Flexible and customizable hiring workflows
-- A foundation for building internal recruitment platforms
-- Reduced dependence on proprietary ATS vendors
-- Improved collaboration across hiring teams
+One pnpm workspace with two packages, `frontend` and `backend`, installed from the root.
 
-## Everything you need to hire better
+| | |
+| --- | --- |
+| **Frontend** | [Next.js](https://nextjs.org) (App Router) · TypeScript · [Tailwind CSS v4](https://tailwindcss.com) · [shadcn/ui](https://ui.shadcn.com) · [hugeicons](https://hugeicons.com) · [React Query](https://tanstack.com/query) |
+| **Backend** | [Express 5](https://expressjs.com) · TypeScript · [Socket.IO](https://socket.io) for live updates |
+| **Database** | PostgreSQL with [Drizzle ORM](https://orm.drizzle.team) |
+| **Background jobs** | [BullMQ](https://docs.bullmq.io) on Redis, run by a required worker process (CV text, file cleanup, optional AI notes) |
+| **Sign-in** | Built in with [Better Auth](https://www.better-auth.com): email and password, no outside identity service |
+| **Storage** | Cloudflare R2 or any S3-compatible bucket |
+| **Email** | Any SMTP server ([Mailpit](https://mailpit.axllent.org) locally) |
+| **AI (optional)** | [Gemini](https://ai.google.dev) |
 
-From job creation to candidate evaluation and hiring decisions, OpenATS provides the
-tools your team needs to build a faster, more organized recruitment process.
+### Repository layout
 
-**Job Management**
-Create, organize, and manage job openings with structured requirements, departments,
-and hiring workflows.
+| Path | |
+| --- | --- |
+| `frontend/` | Next.js app, port 3000. See its [README](./frontend/README.md) |
+| `backend/` | Express API and background worker, port 8080 |
+| `backend/drizzle/` | Generated database migrations, always committed |
+| `e2e/` | Playwright end-to-end tests |
+| `docs/` | The documentation site |
 
-**Candidate Tracking**
-Track applicants through every stage of the hiring process with a clear and
-customizable recruitment pipeline.
+## Getting started
 
-**Interview Management**
-Schedule interviews, collect feedback, and keep everyone aligned throughout the
-candidate evaluation process.
-
-**AI Resume Parsing**
-Automatically extract and organize candidate information from resumes to save time
-and reduce manual work - run as a background job so a slow AI call never blocks a
-candidate-facing page.
-
-**Team Collaboration**
-Collaborate on hiring decisions with shared feedback, candidate reviews, and
-streamlined communication.
-
-**Career Page Builder**
-Build a career page that showcases opportunities and attracts the right candidates to
-your organization.
-
-## The stack
-
-Two independent packages - not a monorepo, no shared `package.json` or lockfile.
-
-|                     |                                                                                                                                                                                              |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Frontend**        | [Next.js](https://nextjs.org) (App Router) · TypeScript · [Tailwind CSS v4](https://tailwindcss.com) · [shadcn/ui](https://ui.shadcn.com) (`base-vega`) · [hugeicons](https://hugeicons.com) |
-| **Backend**         | [Express 5](https://expressjs.com) · TypeScript (compiled to CommonJS) · [Socket.IO](https://socket.io) for realtime updates                                                                 |
-| **Data**            | [Drizzle ORM](https://orm.drizzle.team) · PostgreSQL ([Neon](https://neon.tech) in production, any Postgres locally)                                                                         |
-| **Jobs**            | [BullMQ](https://docs.bullmq.io) on Redis - CV analysis runs as its own worker process, not inline with the API                                                                              |
-| **AI**              | [Gemini](https://ai.google.dev) for resume parsing, scoring and candidate summaries                                                                                                          |
-| **Auth**            | [WSO2 Asgardeo](https://wso2.com/asgardeo) - JWKS-verified, role claims mapped to `super_admin` / `hiring_manager` / `interviewer`                                                           |
-| **Storage**         | Cloudflare R2 (or any S3-compatible bucket) for resumes and attachments                                                                                                                      |
-| **Email**           | [Resend](https://resend.com) for candidate and team notifications                                                                                                                            |
-| **Package manager** | pnpm, installed independently per package                                                                                                                                                    |
-
-### Layout
-
-| Path                             |                                                                                                                            |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `frontend/`                      | Next.js app · :3000                                                                                                        |
-| `backend/`                       | Express API · :8080                                                                                                        |
-| `backend/src/queues/cv-analysis` | The BullMQ queue, worker, and event bridge for background CV scoring                                                       |
-| `backend/src/db/schema`          | Drizzle schema, one file per domain                                                                                        |
-| `backend/drizzle`                | Generated migration SQL - always committed, never hand-edited                                                              |
-| `e2e/`                           | Playwright end-to-end tests, at the root because they span both packages                                                   |
-| `docs/`                          | [IAM setup](./docs-draft/IAM_SETUP.md), [testing guide](./docs-draft/TESTING.md), [road to GA](./docs-draft/GA_ROADMAP.md) |
-
-## Quick start
-
-You need Node.js 22+, Docker, and pnpm (`npm install -g pnpm`).
+You need Node.js 22+, Docker, pnpm (`npm install -g pnpm`), `make` and `openssl`.
 
 ```sh
 git clone https://github.com/chamals3n4/OpenATS.git && cd OpenATS
 
-cd backend
-docker compose up -d          # Postgres on :5432, Redis on :6379
-cp .env.example .env          # fill in ASGARDEO_*, R2_*, RESEND_*, GEMINI_API_KEY
-pnpm install
-pnpm drizzle-kit generate && pnpm drizzle-kit migrate
-pnpm tsx src/db/seed.ts       # required: seeds the 5 default pipeline stages
-pnpm dev                      # API on :8080
+make setup   # installs, creates both .env files, starts Postgres and Redis,
+             # runs migrations, seeds the pipeline stages, creates your first admin
+make dev     # API on :8080, worker, and the app on :3000
 ```
 
-In a second terminal, the CV analysis worker (its own process, separate from the API):
+Open http://localhost:3000 and sign in with the admin you created. Run `make admin` at any time
+to add a super admin, or to get back in if you are locked out.
 
-```sh
-cd backend
-pnpm dev:worker
-```
+A few values can't be generated for you: fill in `R2_*` in `backend/.env` before uploading CVs.
+Email works locally out of the box: everything the app sends lands in Mailpit at http://localhost:8025.
 
-In a third terminal:
+The **background worker is required**. It reads every uploaded CV and removes the files of
+deleted candidates; without it, CVs stay "pending". `make dev` starts it with everything else.
+To turn on AI notes, set `GEMINI_API_KEY` and enable it in **Settings → General**.
 
-```sh
-cd frontend
-cp .env.example .env          # fill in NEXT_PUBLIC_ASGARDEO_*, OPENATS_API_URL
-pnpm install
-pnpm dev                      # app on :3000
-```
-
-Full walkthrough, including how to set up your own Asgardeo application, is in
-[CONTRIBUTING.md](./CONTRIBUTING.md).
+For every step done by hand, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Configuration
 
-Each package reads its own `.env` - there's no shared root env file.
+Each package reads its own `.env`, and each `.env.example` explains every value. Both apps stop at
+startup with a clear message if a required value is missing.
 
 **`backend/.env`**
 
-| Variable                                             | What it's for                                                   |
-| ---------------------------------------------------- | --------------------------------------------------------------- |
-| `DATABASE_URL`                                       | Postgres connection string                                      |
-| `REDIS_URL`                                          | Redis, for the CV analysis job queue                            |
-| `ASGARDEO_JWKS_URL` / `ASGARDEO_ISSUER`              | JWT verification - required for almost every route              |
-| `ENCRYPTION_KEY`                                     | Encrypts stored integration credentials                         |
-| `FRONTEND_URL`                                       | Used for CORS and links in outbound emails                      |
-| `R2_*`                                               | Cloudflare R2 (or compatible) object storage for uploaded files |
-| `RESEND_*`                                           | Transactional email                                             |
-| `GEMINI_API_KEY`                                     | Powers CV parsing, scoring, and AI summaries                    |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` / `GOOGLE_CALENDAR_ID` | Optional - interview scheduling via a Google service account    |
+| Variable | What it is for |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection |
+| `REDIS_URL` | Redis, for background jobs |
+| `AUTH_JWKS_URL` / `AUTH_ISSUER` | Checking sign-in tokens. `AUTH_ISSUER` must equal `BETTER_AUTH_URL` |
+| `ENCRYPTION_KEY` | Encrypts stored integration credentials |
+| `FRONTEND_URL` | CORS and links in emails |
+| `R2_*` | File storage |
+| `SMTP_*` / `MAIL_FROM` | Email, through any SMTP server |
+| `GEMINI_API_KEY` | Optional. AI notes, also off until turned on in Settings |
+| `GOOGLE_OAUTH_*` | Optional. Lets interviewers connect Google Calendar and Meet |
 
 **`frontend/.env`**
 
-| Variable                                  | What it's for                                                  |
-| ----------------------------------------- | -------------------------------------------------------------- |
-| `NEXT_PUBLIC_ASGARDEO_*` / `ASGARDEO_*`   | Sign-in against the same Asgardeo application as the backend   |
-| `OPENATS_API_URL` / `NEXT_PUBLIC_API_URL` | Where the backend is reachable from the server and the browser |
-
-Startup fails fast with a clear message if a required backend variable is missing,
-rather than crashing later on the first request that needs it.
-
-## Deploying
-
-TODO
+| Variable | What it is for |
+| --- | --- |
+| `DATABASE_URL` | The same database as the backend |
+| `BETTER_AUTH_SECRET` / `BETTER_AUTH_URL` | Sign-in: a secret of 32+ characters, and the app's public URL |
+| `OPENATS_API_URL` / `NEXT_PUBLIC_API_URL` | Where the backend is, from the server and the browser |
+| `SMTP_*` / `MAIL_FROM` | Optional. Invite and password reset emails (same values as the backend) |
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full setup walkthrough, branching
-rules, and how to open a pull request.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full setup, branching rules and how to open a
+pull request.
 
 ## Licence
 

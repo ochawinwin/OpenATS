@@ -1,7 +1,7 @@
 export interface Slot {
   datetime: string;
   selected: boolean;
-  /** Already confirmed by another interview — shown but not selectable. */
+  /** Taken by another interview */
   taken?: boolean;
 }
 
@@ -11,6 +11,7 @@ export interface InterviewData {
   meetingUrl: string | null;
   location: string | null;
   bodyText: string | null;
+  durationMinutes?: number | null;
   status: string;
   jobTitle: string;
   candidateName: string;

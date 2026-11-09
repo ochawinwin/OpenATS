@@ -1,4 +1,4 @@
-import { eq, and, or, gt, sql, desc } from "drizzle-orm";
+import { eq, and, or, gt, lt, sql, desc, inArray } from "drizzle-orm";
 import crypto from "node:crypto";
 import { db } from "../../db";
 import {
@@ -9,9 +9,34 @@ import {
   assessmentQuestions,
   assessmentQuestionOptions,
   candidates,
+  company,
+  jobs,
 } from "../../db/schema";
 
-import { mailService } from "../../shared/services/mail.service";
+import { DEFAULT_PASS_MARK, passMarkFor, scoringService } from "../scoring/scoring.service";
+import {
+  gradeChoiceQuestion,
+  hasPassed,
+  isPastDeadline,
+  isWrittenType,
+  scorePercentage,
+} from "./grading";
+import { assessmentInviteEmail } from "../../shared/services/candidate-emails";
+import { emailContext, sendCandidateEmail } from "../../shared/services/candidate-mailer";
+import { frontendUrl } from "../../utils/frontend-url";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** A grading request that cannot be honoured, with the HTTP status to answer with. */
+export class GradingError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "GradingError";
+  }
+}
 
 export interface SubmitAnswerInput {
   questionId: number;
@@ -20,6 +45,7 @@ export interface SubmitAnswerInput {
 }
 
 export interface AttemptCompletionEmailContext {
+  candidateId: number;
   candidateEmail: string;
   candidateFirstName: string;
   assessmentTitle: string;
@@ -31,11 +57,22 @@ export type InviteCandidateResult = {
   didSendInvite: boolean;
 };
 
+/** The attempt was already submitted (or never started), so it cannot be completed now. */
+export class AttemptNotInProgressError extends Error {
+  constructor() {
+    super("Attempt is not in 'started' status");
+    this.name = "AttemptNotInProgressError";
+  }
+}
+
+// How long after the time limit an attempt is taken to be abandoned.
+const ABANDONED_AFTER_SECONDS = 5 * 60;
+
 export const assessmentExecutionService = {
   async inviteCandidate(
     candidateId: number,
     assessmentId: number,
-    expiryDays: number = 7,
+    expiryDays?: number,
   ): Promise<InviteCandidateResult> {
     const now = new Date();
 
@@ -63,8 +100,13 @@ export const assessmentExecutionService = {
     }
 
     const token = crypto.randomBytes(32).toString("hex");
+    // An invitation can name its own length; otherwise the assessment's setting applies.
+    const [setting] = await db
+      .select({ linkExpiryDays: assessments.linkExpiryDays })
+      .from(assessments)
+      .where(eq(assessments.id, assessmentId));
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + expiryDays);
+    expiresAt.setDate(expiresAt.getDate() + (expiryDays ?? setting?.linkExpiryDays ?? 7));
 
     const [attempt] = await db
       .insert(candidateAssessmentAttempts)
@@ -90,33 +132,22 @@ export const assessmentExecutionService = {
         .where(eq(assessments.id, assessmentId));
 
       if (candidate && assessment) {
-        const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-        const inviteUrl = `${frontendUrl}/assessment/${token}`;
+        const inviteUrl = frontendUrl(`/assessment/${token}`);
 
-        const subject = `Assessment Invitation: ${assessment.title}`;
-        const html = `
-          <div style="font-family: sans-serif; line-height: 1.5; color: #333;">
-            <h2>Hello ${candidate.firstName},</h2>
-            <p>You have been invited to complete an assessment for your application.</p>
-            <p><strong>Assessment:</strong> ${assessment.title}</p>
-            <p>Please click the button below to start the assessment. This link will expire on ${expiresAt.toLocaleDateString()}.</p>
-            <div style="margin: 24px 0;">
-              <a href="${inviteUrl}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">
-                Start Assessment
-              </a>
-            </div>
-            <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
-            <p><a href="${inviteUrl}">${inviteUrl}</a></p>
-            <hr style="border: 0; border-top: 1px solid #eee; margin: 24px 0;">
-            <p style="font-size: 14px; color: #666;">This is an automated message from OpenATS.</p>
-          </div>
-        `;
-
-        await mailService.sendAssessmentInviteEmail(
-          candidate.email,
-          subject,
-          html,
-        );
+        const email = assessmentInviteEmail({
+          ...(await emailContext("assessment_invite")),
+          firstName: candidate.firstName,
+          assessmentTitle: assessment.title,
+          inviteUrl,
+          expiresAt,
+        });
+        const result = await sendCandidateEmail({
+          candidateId: candidate.id,
+          to: candidate.email,
+          kind: "assessment_invite",
+          ...email,
+        });
+        if (!result.sent) throw new Error(result.error ?? "The invitation email could not be sent");
         didSendInvite = true;
       }
     }
@@ -167,6 +198,8 @@ export const assessmentExecutionService = {
           lastName: candidates.lastName,
           email: candidates.email,
         },
+        // The position the candidate applied for, shown on their page.
+        jobTitle: jobs.title,
       })
       .from(candidateAssessmentAttempts)
       .innerJoin(
@@ -177,6 +210,7 @@ export const assessmentExecutionService = {
         candidates,
         eq(candidateAssessmentAttempts.candidateId, candidates.id),
       )
+      .leftJoin(jobs, eq(candidates.jobId, jobs.id))
       .where(eq(candidateAssessmentAttempts.token, token));
 
     if (!attempt) return null;
@@ -211,15 +245,55 @@ export const assessmentExecutionService = {
       }),
     );
 
+    // What the candidate has answered so far, so a reload or a second device carries on
+    // from the same place instead of showing every question as blank.
+    const answerRows = await db
+      .select({
+        id: candidateAssessmentAnswers.id,
+        questionId: candidateAssessmentAnswers.questionId,
+        answerText: candidateAssessmentAnswers.answerText,
+      })
+      .from(candidateAssessmentAnswers)
+      .where(eq(candidateAssessmentAnswers.attemptId, attempt.id));
+    const selectionRows =
+      answerRows.length > 0
+        ? await db
+            .select({
+              answerId: candidateAssessmentAnswerSelections.answerId,
+              optionId: candidateAssessmentAnswerSelections.optionId,
+            })
+            .from(candidateAssessmentAnswerSelections)
+            .where(
+              inArray(
+                candidateAssessmentAnswerSelections.answerId,
+                answerRows.map((a) => a.id),
+              ),
+            )
+        : [];
+    const savedAnswers = answerRows.map((a) => ({
+      questionId: a.questionId,
+      answerText: a.answerText,
+      optionIds: selectionRows.filter((s) => s.answerId === a.id).map((s) => s.optionId),
+    }));
+
+    // Who the assessment is from, shown at the top of the candidate's page.
+    const [companyRow] = await db
+      .select({ name: company.name })
+      .from(company)
+      .limit(1);
+
     return {
       ...attempt,
       assessment: { ...attempt.assessment, questions: questionsWithOptions },
+      savedAnswers,
+      company: companyRow ?? null,
     };
   },
 
   async getAttemptCompletionEmailContext(attemptId: number): Promise<AttemptCompletionEmailContext | null> {
     const [result] = await db
       .select({
+        candidateId: candidates.id,
         candidateEmail: candidates.email,
         candidateFirstName: candidates.firstName,
         assessmentTitle: assessments.title,
@@ -297,24 +371,24 @@ export const assessmentExecutionService = {
     });
   },
 
+  /**
+   * Finishes an attempt. Choice questions are graded now. A written answer waits for a person
+   * to grade it, and until every one is graded the attempt has no score or pass/fail result, so
+   * the candidate's total ignores the Assessment part rather than counting it as zero.
+   */
   async completeAttempt(id: number) {
     return await db.transaction(async (tx) => {
+      // Locked for the length of the transaction. Two submits at once (a double click, or the
+      // candidate's submit meeting the timed-out check) queue up here, and the second finds the
+      // attempt already completed instead of grading and emailing a second time.
       const [attempt] = await tx
         .select()
         .from(candidateAssessmentAttempts)
-        .where(eq(candidateAssessmentAttempts.id, id));
+        .where(eq(candidateAssessmentAttempts.id, id))
+        .for("update");
 
       if (!attempt || attempt.status !== "started") {
-        throw new Error("Attempt is not in 'started' status");
-      }
-
-      const [assessment] = await tx
-        .select()
-        .from(assessments)
-        .where(eq(assessments.id, attempt.assessmentId));
-
-      if (!assessment) {
-        throw new Error("Assessment not found");
+        throw new AttemptNotInProgressError();
       }
 
       const questions = await tx
@@ -322,14 +396,8 @@ export const assessmentExecutionService = {
         .from(assessmentQuestions)
         .where(eq(assessmentQuestions.assessmentId, attempt.assessmentId));
 
-      let totalScoreRaw = 0;
-      let totalPossiblePoints = 0;
-
       for (const question of questions) {
-        const questionPoints = Number(question.points);
-        totalPossiblePoints += questionPoints;
-
-        const [candidateAnswer] = await tx
+        const [answer] = await tx
           .select()
           .from(candidateAssessmentAnswers)
           .where(
@@ -338,18 +406,15 @@ export const assessmentExecutionService = {
               eq(candidateAssessmentAnswers.questionId, question.id),
             ),
           );
+        if (!answer) continue;
 
-        if (!candidateAnswer) continue;
-
-        let pointsEarned = 0;
-
-        if (
-          question.questionType === "multiple_choice" ||
-          question.questionType === "radio" ||
-          question.questionType === "checkbox"
-        ) {
-          const correctOptions = await tx
-            .select()
+        let pointsEarned: number | null;
+        if (isWrittenType(question.questionType)) {
+          // Blank answers earn nothing; a real one waits for review.
+          pointsEarned = answer.answerText?.trim() ? null : 0;
+        } else {
+          const correct = await tx
+            .select({ id: assessmentQuestionOptions.id })
             .from(assessmentQuestionOptions)
             .where(
               and(
@@ -357,58 +422,212 @@ export const assessmentExecutionService = {
                 eq(assessmentQuestionOptions.isCorrect, true),
               ),
             );
-
-          const candidateSelections = await tx
-            .select()
+          const picked = await tx
+            .select({ optionId: candidateAssessmentAnswerSelections.optionId })
             .from(candidateAssessmentAnswerSelections)
-            .where(
-              eq(
-                candidateAssessmentAnswerSelections.answerId,
-                candidateAnswer.id,
-              ),
-            );
-
-          const correctOptionIds = correctOptions.map((o) => o.id).sort();
-          const candidateOptionIds = candidateSelections
-            .map((s) => s.optionId)
-            .sort();
-
-          const isCorrect =
-            JSON.stringify(correctOptionIds) ===
-            JSON.stringify(candidateOptionIds);
-          if (isCorrect) pointsEarned = questionPoints;
-        } else {
-          pointsEarned = 0;
+            .where(eq(candidateAssessmentAnswerSelections.answerId, answer.id));
+          pointsEarned = gradeChoiceQuestion(
+            Number(question.points),
+            correct.map((o) => o.id),
+            picked.map((s) => s.optionId),
+          );
         }
 
         await tx
           .update(candidateAssessmentAnswers)
           .set({ pointsEarned, updatedAt: new Date() })
-          .where(eq(candidateAssessmentAnswers.id, candidateAnswer.id));
-
-        totalScoreRaw += pointsEarned;
+          .where(eq(candidateAssessmentAnswers.id, answer.id));
       }
 
-      const scorePercentage =
-        totalPossiblePoints > 0
-          ? (totalScoreRaw / totalPossiblePoints) * 100
-          : 0;
+      await tx
+        .update(candidateAssessmentAttempts)
+        .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(candidateAssessmentAttempts.id, id));
 
-      const [completed] = await tx
+      return assessmentExecutionService.finalizeIfGraded(tx, id);
+    });
+  },
+
+  /**
+   * Writes the score and pass/fail once nothing is waiting for a person to grade, then updates
+   * the candidate's total. Returns the attempt either way; its score stays null while pending.
+   */
+  async finalizeIfGraded(tx: Tx, attemptId: number) {
+    const [attempt] = await tx
+      .select()
+      .from(candidateAssessmentAttempts)
+      .where(eq(candidateAssessmentAttempts.id, attemptId));
+    if (!attempt) throw new Error("Attempt not found");
+
+    const questions = await tx
+      .select({ id: assessmentQuestions.id, points: assessmentQuestions.points })
+      .from(assessmentQuestions)
+      .where(eq(assessmentQuestions.assessmentId, attempt.assessmentId));
+    const answers = await tx
+      .select({
+        questionId: candidateAssessmentAnswers.questionId,
+        pointsEarned: candidateAssessmentAnswers.pointsEarned,
+      })
+      .from(candidateAssessmentAnswers)
+      .where(eq(candidateAssessmentAnswers.attemptId, attemptId));
+
+    const scoreTotal = questions.reduce((sum, q) => sum + Number(q.points), 0);
+
+    if (answers.some((a) => a.pointsEarned === null)) {
+      const [pending] = await tx
         .update(candidateAssessmentAttempts)
         .set({
-          status: "completed",
-          completedAt: new Date(),
-          scoreRaw: totalScoreRaw,
-          scoreTotal: totalPossiblePoints,
-          scorePercentage,
+          scoreRaw: null,
+          scoreTotal,
+          scorePercentage: null,
           passed: null,
           updatedAt: new Date(),
         })
-        .where(eq(candidateAssessmentAttempts.id, id))
+        .where(eq(candidateAssessmentAttempts.id, attemptId))
         .returning();
+      await scoringService.recompute(attempt.candidateId, tx);
+      return pending;
+    }
 
-      return completed;
+    const scoreRaw = answers.reduce((sum, a) => sum + Number(a.pointsEarned), 0);
+    const percentage = scorePercentage(scoreRaw, scoreTotal);
+
+    const [owner] = await tx
+      .select({ jobId: candidates.jobId })
+      .from(candidates)
+      .where(eq(candidates.id, attempt.candidateId));
+    const passMark = owner
+      ? await passMarkFor(tx, owner.jobId, attempt.assessmentId)
+      : DEFAULT_PASS_MARK;
+
+    const [done] = await tx
+      .update(candidateAssessmentAttempts)
+      .set({
+        scoreRaw,
+        scoreTotal,
+        scorePercentage: percentage,
+        passed: hasPassed(percentage, passMark),
+        updatedAt: new Date(),
+      })
+      .where(eq(candidateAssessmentAttempts.id, attemptId))
+      .returning();
+    await scoringService.recompute(attempt.candidateId, tx);
+    return done;
+  },
+
+  /**
+   * Marks invitations whose link ran out unused as expired, and re-scores those candidates, so a
+   * test that was never taken counts as 0 instead of being quietly left out. Safe to run often and
+   * from several servers at once.
+   */
+  async expireStaleInvites(now: Date = new Date()): Promise<number> {
+    const expired = await db
+      .update(candidateAssessmentAttempts)
+      .set({ status: "expired", updatedAt: now })
+      .where(
+        and(
+          eq(candidateAssessmentAttempts.status, "pending"),
+          lt(candidateAssessmentAttempts.expiresAt, now),
+        ),
+      )
+      .returning({ candidateId: candidateAssessmentAttempts.candidateId });
+    for (const candidateId of new Set(expired.map((e) => e.candidateId))) {
+      await scoringService.recompute(candidateId);
+    }
+    return expired.length;
+  },
+
+  /**
+   * Finishes attempts that were started and then left: the tab was closed, or the browser never
+   * sent the submit. Without this they stay "in progress" for ever and the candidate never gets
+   * an Assessment score. Whatever was answered is graded, as if they had pressed submit when the
+   * time ran out. An attempt on a test with no time left to run is one past its time limit, or
+   * whose link has expired.
+   *
+   * The wait before stepping in is longer than the grace a late answer gets, so the browser's own
+   * automatic submit, which also emails the candidate, normally gets there first. Safe to run
+   * often and from several servers at once.
+   */
+  async completeAbandonedAttempts(now: Date = new Date()): Promise<number> {
+    const started = await db
+      .select({
+        id: candidateAssessmentAttempts.id,
+        startedAt: candidateAssessmentAttempts.startedAt,
+        expiresAt: candidateAssessmentAttempts.expiresAt,
+        timeLimit: assessments.timeLimit,
+      })
+      .from(candidateAssessmentAttempts)
+      .innerJoin(assessments, eq(candidateAssessmentAttempts.assessmentId, assessments.id))
+      .where(eq(candidateAssessmentAttempts.status, "started"));
+
+    let completed = 0;
+    for (const attempt of started) {
+      const timeUp = isPastDeadline(attempt.startedAt, attempt.timeLimit, now, ABANDONED_AFTER_SECONDS);
+      if (!timeUp && attempt.expiresAt >= now) continue;
+
+      try {
+        await this.completeAttempt(attempt.id);
+        completed++;
+      } catch (error) {
+        // Submitted by the candidate between the query above and here. Nothing left to do.
+        if (!(error instanceof AttemptNotInProgressError)) throw error;
+      }
+    }
+    return completed;
+  },
+
+  /** Whose attempt this is, so a request about it can be checked against that candidate's job. */
+  async getAttemptOwner(attemptId: number): Promise<{ candidateId: number; jobId: number } | null> {
+    const [row] = await db
+      .select({ candidateId: candidateAssessmentAttempts.candidateId, jobId: candidates.jobId })
+      .from(candidateAssessmentAttempts)
+      .innerJoin(candidates, eq(candidateAssessmentAttempts.candidateId, candidates.id))
+      .where(eq(candidateAssessmentAttempts.id, attemptId));
+    return row ?? null;
+  },
+
+  /** A reviewer's points for one written answer, from 0 up to the question's points. */
+  async gradeWrittenAnswer(attemptId: number, questionId: number, points: number) {
+    return await db.transaction(async (tx) => {
+      const [attempt] = await tx
+        .select()
+        .from(candidateAssessmentAttempts)
+        .where(eq(candidateAssessmentAttempts.id, attemptId));
+      if (!attempt) throw new GradingError("Attempt not found", 404);
+      if (attempt.status !== "completed") {
+        throw new GradingError("Only a completed attempt can be graded", 400);
+      }
+
+      const [question] = await tx
+        .select()
+        .from(assessmentQuestions)
+        .where(
+          and(
+            eq(assessmentQuestions.id, questionId),
+            eq(assessmentQuestions.assessmentId, attempt.assessmentId),
+          ),
+        );
+      if (!question) throw new GradingError("Question not found", 404);
+      if (!isWrittenType(question.questionType)) {
+        throw new GradingError("Only written answers are graded by hand", 400);
+      }
+      if (points < 0 || points > Number(question.points)) {
+        throw new GradingError(`Points must be between 0 and ${Number(question.points)}`, 400);
+      }
+
+      const updated = await tx
+        .update(candidateAssessmentAnswers)
+        .set({ pointsEarned: points, updatedAt: new Date() })
+        .where(
+          and(
+            eq(candidateAssessmentAnswers.attemptId, attemptId),
+            eq(candidateAssessmentAnswers.questionId, questionId),
+          ),
+        )
+        .returning({ id: candidateAssessmentAnswers.id });
+      if (updated.length === 0) throw new GradingError("There is no answer to grade", 404);
+
+      return assessmentExecutionService.finalizeIfGraded(tx, attemptId);
     });
   },
 
@@ -507,8 +726,14 @@ export const assessmentExecutionService = {
       };
     });
 
+    // Written answers still waiting for a person to grade them.
+    const pendingReview = formattedQuestions.filter(
+      (q) => isWrittenType(q.questionType) && q.answer && q.answer.pointsEarned === null,
+    ).length;
+
     return {
       attempt,
+      pendingReview,
       questions: formattedQuestions,
     };
   },

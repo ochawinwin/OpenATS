@@ -17,7 +17,7 @@ import {
   QUESTION_TYPE_LABELS,
   isChoiceType,
   type QuestionType,
-} from "../../lib/question-utils";
+} from "../../_lib/question-utils";
 
 const TYPE_ICONS: Record<QuestionType, typeof TextIcon> = {
   short_answer: TextIcon,
@@ -38,10 +38,7 @@ interface QuestionRowProps {
   onDelete: (question: CustomQuestion) => void;
 }
 
-/**
- * A top-level component, not one defined inside the list's render: a component created during
- * render is a new type every time, so React would remount every row on each keystroke elsewhere.
- */
+/** Keep this outside the list so rows don't remount */
 export function QuestionRow({ question, index, canManage, onMove, onEdit, onDelete }: QuestionRowProps) {
   const { ref, isDragging, isOver } = useDragSort({
     id: question.id,
@@ -103,6 +100,16 @@ export function QuestionRow({ question, index, canManage, onMove, onEdit, onDele
                 className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-0.5 text-sm text-slate-800 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200"
               >
                 {o.label}
+                {o.points > 0 && (
+                  <span className="ml-1.5 text-xs font-semibold text-slate-500 dark:text-neutral-400">
+                    {o.points} pts
+                  </span>
+                )}
+                {o.isKnockout && (
+                  <span className="ml-1.5 rounded bg-red-50 px-1.5 py-px text-xs font-semibold text-red-700 dark:bg-red-950/40 dark:text-red-400">
+                    Knockout
+                  </span>
+                )}
               </li>
             ))}
             {hidden > 0 && (

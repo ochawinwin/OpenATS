@@ -7,6 +7,13 @@ import {
 } from "../../db/schema";
 import { cleanObject as clean } from "../../utils/object.utils";
 
+export type AssessmentQuestionType =
+  | "short_answer"
+  | "long_answer"
+  | "multiple_choice"
+  | "radio"
+  | "checkbox";
+
 export interface QuestionOptionInput {
   label: string;
   isCorrect?: boolean | undefined;
@@ -16,7 +23,7 @@ export interface QuestionOptionInput {
 export interface QuestionInput {
   title: string;
   description?: string | null | undefined;
-  questionType: "short_answer" | "multiple_choice";
+  questionType: AssessmentQuestionType;
   points?: number | undefined;
   position: number;
   options?: QuestionOptionInput[] | undefined;
@@ -26,6 +33,7 @@ export interface CreateAssessmentInput {
   title: string;
   description?: string | null | undefined;
   timeLimit: number;
+  linkExpiryDays?: number | undefined;
   createdBy: number;
   questions?: QuestionInput[] | undefined;
 }
@@ -34,12 +42,13 @@ export interface UpdateAssessmentInput {
   title?: string | undefined;
   description?: string | null | undefined;
   timeLimit?: number | undefined;
+  linkExpiryDays?: number | undefined;
 }
 
 export interface CreateQuestionInput {
   title: string;
   description?: string | null | undefined;
-  questionType: "short_answer" | "multiple_choice";
+  questionType: AssessmentQuestionType;
   points?: number | undefined;
   position: number;
   options?: QuestionOptionInput[] | undefined;
@@ -48,7 +57,7 @@ export interface CreateQuestionInput {
 export interface UpdateQuestionInput {
   title?: string | undefined;
   description?: string | null | undefined;
-  questionType?: ("short_answer" | "multiple_choice") | undefined;
+  questionType?: (AssessmentQuestionType) | undefined;
   points?: number | undefined;
   position?: number | undefined;
   options?: QuestionOptionInput[] | undefined;

@@ -1,16 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PlusSignIcon } from "@hugeicons/core-free-icons";
-import { ThemeButton } from "@/components/theme/theme-button";
 import { useIsManager } from "@/hooks/use-role";
 import { AssessmentSearchBar } from "./search-bar";
+import { Button } from "@/components/ui/button";
 
 export function AssessmentHeader({
+  tab,
   onCreate,
   searchTerm,
   onSearchChange,
 }: {
+  tab: "assessments" | "assignments";
   onCreate: () => void;
   searchTerm: string;
   onSearchChange: (value: string) => void;
@@ -23,12 +26,24 @@ export function AssessmentHeader({
       </h1>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <AssessmentSearchBar value={searchTerm} onChange={onSearchChange} />
+        {tab === "assessments" && (
+          <AssessmentSearchBar value={searchTerm} onChange={onSearchChange} />
+        )}
 
-        {isManager && (
-          <ThemeButton
+        {isManager && tab === "assignments" && (
+          <Button
+            render={<Link href="/assessments/assignments/new" />}
+            className="h-9 cursor-pointer gap-2 rounded-md border-none bg-theme px-4 text-sm font-semibold text-white shadow-none hover:bg-theme-hover"
+          >
+            <HugeiconsIcon icon={PlusSignIcon} className="size-4" strokeWidth={2.5} />
+            <span>New Assignment</span>
+          </Button>
+        )}
+
+        {isManager && tab === "assessments" && (
+          <Button
             onClick={onCreate}
-            className="h-8 px-4 gap-2 text-sm shadow-none border-none"
+            className="h-9 cursor-pointer gap-2 rounded-md border-none bg-theme px-4 text-sm font-semibold text-white shadow-none hover:bg-theme-hover"
           >
             <HugeiconsIcon
               icon={PlusSignIcon}
@@ -36,7 +51,7 @@ export function AssessmentHeader({
               strokeWidth={2.5}
             />
             <span>New Assessment</span>
-          </ThemeButton>
+          </Button>
         )}
       </div>
     </div>

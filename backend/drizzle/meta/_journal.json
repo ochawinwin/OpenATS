@@ -211,6 +211,118 @@
       "when": 1790931687558,
       "tag": "0029_harsh_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1791226131129,
+      "tag": "0030_even_preak",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1791550178918,
+      "tag": "0031_chief_professor_monster",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791555374382,
+      "tag": "0032_quick_piledriver",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791574351374,
+      "tag": "0033_huge_thunderbolt_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791639938889,
+      "tag": "0034_curious_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1791723906035,
+      "tag": "0035_ambitious_wraith",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791724653621,
+      "tag": "0036_same_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791743623464,
+      "tag": "0037_blushing_naoko",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1791804760027,
+      "tag": "0038_petite_chameleon",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1791806269192,
+      "tag": "0039_quiet_hannibal_king",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1791898566516,
+      "tag": "0040_private_cv_storage",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1791900397817,
+      "tag": "0041_resume_uploads",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791906747215,
+      "tag": "0042_scheduling_offers_time_zone",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792409127900,
+      "tag": "0043_assessment_link_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1792412998768,
+      "tag": "0044_take_home_assignments",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1793702318215,
+      "tag": "0045_notifications",
+      "breakpoints": true
     }
   ]
 }

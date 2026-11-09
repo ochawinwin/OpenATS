@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { serverFetch } from "@/lib/auth-action";
+import { clientFetch } from "@/lib/client-fetch";
 import type { InterviewListItem } from "@/types";
 
 export function useInterviews(filters?: Record<string, string | number>) {
@@ -15,25 +15,26 @@ export function useInterviews(filters?: Record<string, string | number>) {
   return useQuery({
     queryKey: ["interviews", filters],
     queryFn: () =>
-      serverFetch<{ data: InterviewListItem[] }>(
+      clientFetch<{ data: InterviewListItem[] }>(
         `/interviews${qs ? `?${qs}` : ""}`,
       ),
     staleTime: 1000 * 60 * 5,
   });
 }
 
+/** When one interviewer is already busy: start and end of each upcoming interview. */
 export type AllocatedSlot = {
-  datetime: string;
-  interviewerId: number | null;
+  start: string;
+  end: string;
 };
 
-/** Upcoming confirmed interview times — used to flag already-taken slots when scheduling. */
-export function useAllocatedSlots(enabled = true) {
+/** The chosen interviewer's upcoming interviews, used to mark times that would clash */
+export function useAllocatedSlots(interviewerId: number | null) {
   return useQuery({
-    queryKey: ["interviews", "allocated-slots"],
+    queryKey: ["interviews", "allocated-slots", interviewerId],
     queryFn: () =>
-      serverFetch<{ data: AllocatedSlot[] }>("/interviews/allocated-slots"),
-    enabled,
+      clientFetch<{ data: AllocatedSlot[] }>(`/interviews/allocated-slots?interviewerId=${interviewerId}`),
+    enabled: !!interviewerId,
     staleTime: 1000 * 30,
   });
 }
@@ -42,7 +43,7 @@ export function useDeleteInterview() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) =>
-      serverFetch(`/interviews/${id}`, { method: "DELETE" }),
+      clientFetch(`/interviews/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["interviews"] });
       queryClient.invalidateQueries({ queryKey: ["candidates"] });
@@ -62,14 +63,14 @@ export function useUpdateInterview() {
       durationMinutes?: number | null;
       notes?: string | null;
       outcome?: "pending" | "pass" | "fail";
-      status?: "pending_schedule" | "scheduled" | "completed" | "cancelled";
+      status?: "pending_schedule" | "scheduled" | "completed" | "cancelled" | "expired";
       eventName?: string;
       eventType?: "virtual" | "onsite";
       meetingUrl?: string | null;
       location?: string | null;
       bodyText?: string | null;
     }) =>
-      serverFetch(`/interviews/${id}`, {
+      clientFetch(`/interviews/${id}`, {
         method: "PATCH",
         body: JSON.stringify(data),
       }),

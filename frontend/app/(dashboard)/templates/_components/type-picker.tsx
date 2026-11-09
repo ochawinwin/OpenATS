@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { TYPE_META, type TemplateType } from "../lib/templates-utils";
+import { TYPE_META, type TemplateType } from "../_lib/templates-utils";
 
 const TEMPLATE_TYPES: TemplateType[] = ["email", "event"];
 
@@ -96,7 +96,6 @@ export function TemplateTypePicker({
             className="h-9 gap-2 border-none bg-theme px-4 text-sm font-semibold text-white hover:bg-theme-hover disabled:opacity-50"
           >
             Continue
-            <HugeiconsIcon icon={ArrowRight02Icon} className="size-4" strokeWidth={2} />
           </Button>
         </DialogFooter>
       </DialogContent>

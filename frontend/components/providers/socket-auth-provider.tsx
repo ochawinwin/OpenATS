@@ -2,11 +2,7 @@
 
 import { createContext, useContext } from "react";
 
-/**
- * Carries the Asgardeo access token from the dashboard layout (a server
- * component, where the token lives) down to the client hooks that open
- * socket connections. The backend rejects sockets without it.
- */
+// Passes the socket token to client hooks
 const SocketTokenContext = createContext<string | undefined>(undefined);
 
 export function SocketAuthProvider({

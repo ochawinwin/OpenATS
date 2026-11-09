@@ -1,34 +1,17 @@
 "use client";
 
 import {
-  Target01Icon,
+  AiScanTextIcon,
   QuestionIcon,
   Clock01Icon,
-  Award01Icon,
-  Calendar02Icon,
+  TelegramIcon,
+  CoPresentIcon,
   UserRemove01Icon,
   Mail01Icon,
-  ChartEvaluationIcon,
+  Quiz03Icon,
+  TaskDone01Icon,
+  TextAlignLeftIcon,
 } from "@hugeicons/core-free-icons";
-
-export function timeAgo(dateStr: string) {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-export function formatDate(dateStr: string | null) {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 export function getInitials(first: string, last: string) {
   return `${first.charAt(0)}${last.charAt(0)}`.toUpperCase();
@@ -81,26 +64,31 @@ export const REJECTION_REASONS = [
 ] as const;
 
 export type SectionId =
-  | "job-fit"
+  | "ai-analysis"
   | "answers"
+  | "cv-text"
   | "history"
   | "offer"
   | "interviews"
   | "rejection"
   | "email"
-  | "scores";
+  | "scores"
+  | "assignments";
 
 export const SECTIONS = [
-  { id: "job-fit" as SectionId, label: "Job Fit", icon: Target01Icon },
+  { id: "cv-text" as SectionId, label: "CV Summary", icon: TextAlignLeftIcon },
+  // Only when AI analysis is on
+  { id: "ai-analysis" as SectionId, label: "AI analysis", icon: AiScanTextIcon },
   { id: "answers" as SectionId, label: "Answers", icon: QuestionIcon },
   { id: "history" as SectionId, label: "Stage History", icon: Clock01Icon },
-  { id: "offer" as SectionId, label: "Offer", icon: Award01Icon },
-  { id: "interviews" as SectionId, label: "Interviews", icon: Calendar02Icon },
+  { id: "offer" as SectionId, label: "Offer", icon: TelegramIcon },
+  { id: "interviews" as SectionId, label: "Interviews", icon: CoPresentIcon },
   { id: "rejection" as SectionId, label: "Rejection", icon: UserRemove01Icon },
   { id: "email" as SectionId, label: "Send Email", icon: Mail01Icon },
   {
     id: "scores" as SectionId,
-    label: "Assessments",
-    icon: ChartEvaluationIcon,
+    label: "Scores",
+    icon: Quiz03Icon,
   },
+  { id: "assignments" as SectionId, label: "Assignments", icon: TaskDone01Icon },
 ];

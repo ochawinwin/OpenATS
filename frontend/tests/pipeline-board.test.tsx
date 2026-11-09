@@ -6,7 +6,7 @@ import { BoardColumn } from "@/app/(dashboard)/jobs/[id]/pipeline/_components/bo
 import { BoardHeader } from "@/app/(dashboard)/jobs/[id]/pipeline/_components/board-header";
 import { BoardFiltersBar } from "@/app/(dashboard)/jobs/[id]/pipeline/_components/board-filters-bar";
 import { BulkActionBar } from "@/app/(dashboard)/jobs/[id]/pipeline/_components/bulk-action-bar";
-import { EMPTY_FILTERS } from "@/app/(dashboard)/jobs/[id]/pipeline/lib/board-filters";
+import { EMPTY_FILTERS } from "@/app/(dashboard)/jobs/[id]/pipeline/_lib/board-filters";
 import { MoveConfirmDialog } from "@/app/(dashboard)/jobs/[id]/pipeline/_components/move-confirm-dialog";
 import type { BoardCandidate, PipelineStage } from "@/types";
 
@@ -70,9 +70,11 @@ describe("BoardColumn", () => {
     setup([cand(1, "Ada", "Lovelace"), cand(2, "Grace", "Hopper")]);
     expect(screen.getByRole("heading", { name: "Applied" })).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
-    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+    // The card shows the first name only; the full name stays in its tooltip and labels.
+    expect(screen.getByText("Ada")).toBeInTheDocument();
+    expect(screen.queryByText("Ada Lovelace")).toBeNull();
     expect(screen.getAllByText("Applied 3h ago")).toHaveLength(2);
-    expect(screen.getByText("AL")).toBeInTheDocument();
+    expect(screen.queryByText("AL")).toBeNull();
   });
 
   it("says so when the stage is empty, and shows skeletons, not 'empty', while loading", () => {
@@ -128,6 +130,19 @@ describe("selection", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada Lovelace" }));
     expect(onToggleSelect).toHaveBeenCalledWith(7);
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("shows no avatar, and outlines a selected card with a single theme border", () => {
+    setup(two, { selectedIds: [7] });
+    const selected = screen.getByRole("button", { name: /Ada Lovelace, applied/ });
+    expect(selected.className).toMatch(/border-theme/);
+    expect(selected.className).not.toMatch(/ring-/);
+    expect(screen.getByRole("button", { name: /Grace Hopper, applied/ }).className).not.toMatch(/border-theme/);
+  });
+
+  it("always shows the select box, so a click cannot leave it stuck half-hidden", () => {
+    setup(two);
+    expect(screen.getByRole("checkbox", { name: "Select Ada Lovelace" }).className).not.toMatch(/opacity-0/);
   });
 
   it("toggles instead of opening once something is selected", () => {

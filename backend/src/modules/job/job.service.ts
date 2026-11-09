@@ -1,5 +1,8 @@
 import { eq, desc, ilike, inArray, and, sql } from "drizzle-orm";
 import { db, NewJob } from "../../db";
+import { cleanObject as clean } from "../../utils/object.utils";
+import { requestResumeDeletion } from "../../queues/resume-delete/queue";
+import { sanitizeJobDescription } from "./job-description";
 import {
   jobs,
   jobSkills,
@@ -40,6 +43,10 @@ export type CreateJobInput = {
   salaryMin?: number | null;
   salaryMax?: number | null;
   status?: "draft" | "inactive" | "published" | "closed" | "archived";
+  scoreWeightQuestions?: number;
+  scoreWeightAssessment?: number;
+  scoreWeightRating?: number;
+  scoreWeightInterview?: number;
   createdBy: number;
 };
 
@@ -62,6 +69,10 @@ export type UpdateJobInput = {
   salaryMin?: number | null;
   salaryMax?: number | null;
   status?: "draft" | "inactive" | "published" | "closed" | "archived";
+  scoreWeightQuestions?: number;
+  scoreWeightAssessment?: number;
+  scoreWeightRating?: number;
+  scoreWeightInterview?: number;
 };
 
 function generateSlug(title: string): string {
@@ -164,11 +175,21 @@ export const jobService = {
 
   async deleteMany(ids: number[]) {
     if (ids.length === 0) return [];
-    return db.transaction(async (tx) => {
+    let resumeKeys: Array<string | null> = [];
+    const deleted = await db.transaction(async (tx) => {
       await tx.delete(offers).where(inArray(offers.jobId, ids));
-      await tx.delete(candidates).where(inArray(candidates.jobId, ids));
+      const removed = await tx
+        .delete(candidates)
+        .where(inArray(candidates.jobId, ids))
+        .returning({ resumeKey: candidates.resumeKey });
+      resumeKeys = removed.map((candidate) => candidate.resumeKey);
       return tx.delete(jobs).where(inArray(jobs.id, ids)).returning();
     });
+
+    // Deleting a job deletes its candidates, so their CV files go too. After the commit, so a
+    // rolled-back delete erases nothing.
+    await requestResumeDeletion(resumeKeys);
+    return deleted;
   },
 
   async getById(id: number) {
@@ -231,7 +252,8 @@ export const jobService = {
         departmentId: jobData.departmentId,
         employmentType: jobData.employmentType,
         location: jobData.location ?? null,
-        description: jobData.description ?? null,
+        // Cleaned here, in the one place a description is written, whatever sent it.
+        description: sanitizeJobDescription(jobData.description) ?? null,
         salaryType: jobData.salaryType ?? null,
         currency: jobData.currency ?? null,
         payFrequency: jobData.payFrequency ?? null,
@@ -239,6 +261,12 @@ export const jobService = {
         salaryMin: jobData.salaryMin ?? null,
         salaryMax: jobData.salaryMax ?? null,
         status: jobData.status ?? "draft",
+        ...clean({
+          scoreWeightQuestions: jobData.scoreWeightQuestions,
+          scoreWeightAssessment: jobData.scoreWeightAssessment,
+          scoreWeightRating: jobData.scoreWeightRating,
+          scoreWeightInterview: jobData.scoreWeightInterview,
+        }),
         createdBy: jobData.createdBy,
       };
 
@@ -288,6 +316,8 @@ export const jobService = {
         ...jobData,
         updatedAt: new Date(),
       };
+      if (jobData.description !== undefined)
+        updateData.description = sanitizeJobDescription(jobData.description);
       if (jobData.salaryFixed !== undefined)
         updateData.salaryFixed = jobData.salaryFixed || null;
       if (jobData.salaryMin !== undefined)
@@ -316,10 +346,24 @@ export const jobService = {
     });
   },
 
+  /** What deleting these jobs takes with it, to say so before anyone confirms. */
+  async getDeleteSummary(ids: number[]) {
+    const [[candidateRow], [offerRow]] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(candidates).where(inArray(candidates.jobId, ids)),
+      db.select({ count: sql<number>`count(*)::int` }).from(offers).where(inArray(offers.jobId, ids)),
+    ]);
+    return { candidates: candidateRow?.count ?? 0, offers: offerRow?.count ?? 0 };
+  },
+
   async delete(id: number) {
-    return await db.transaction(async (tx) => {
+    let resumeKeys: Array<string | null> = [];
+    const deletedJob = await db.transaction(async (tx) => {
       await tx.delete(offers).where(eq(offers.jobId, id));
-      await tx.delete(candidates).where(eq(candidates.jobId, id));
+      const removed = await tx
+        .delete(candidates)
+        .where(eq(candidates.jobId, id))
+        .returning({ resumeKey: candidates.resumeKey });
+      resumeKeys = removed.map((candidate) => candidate.resumeKey);
 
       const [deleted] = await tx
         .delete(jobs)
@@ -328,6 +372,10 @@ export const jobService = {
 
       return deleted ?? null;
     });
+
+    // The candidates' CV files, as in deleteMany.
+    await requestResumeDeletion(resumeKeys);
+    return deletedJob;
   },
 
   async getAssessments(jobId: number) {
@@ -336,6 +384,7 @@ export const jobService = {
         id: jobAssessmentAttachments.id,
         assessmentId: jobAssessmentAttachments.assessmentId,
         triggerStageId: jobAssessmentAttachments.triggerStageId,
+        passMark: jobAssessmentAttachments.passMark,
         createdAt: jobAssessmentAttachments.createdAt,
       })
       .from(jobAssessmentAttachments)
@@ -346,6 +395,7 @@ export const jobService = {
     jobId: number;
     assessmentId: number;
     triggerStageId: number;
+    passMark?: number;
   }) {
     const [attached] = await db
       .insert(jobAssessmentAttachments)
@@ -353,9 +403,24 @@ export const jobService = {
         jobId: input.jobId,
         assessmentId: input.assessmentId,
         triggerStageId: input.triggerStageId,
+        ...(input.passMark !== undefined && { passMark: input.passMark }),
       })
       .returning();
     return attached;
+  },
+
+  async updateAttachmentPassMark(jobId: number, attachmentId: number, passMark: number) {
+    const [updated] = await db
+      .update(jobAssessmentAttachments)
+      .set({ passMark })
+      .where(
+        and(
+          eq(jobAssessmentAttachments.id, attachmentId),
+          eq(jobAssessmentAttachments.jobId, jobId),
+        ),
+      )
+      .returning();
+    return updated ?? null;
   },
 
   async detachAssessment(attachmentId: number) {

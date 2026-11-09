@@ -1,19 +1,30 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { serverFetch } from "@/lib/auth-action";
+import { clientFetch } from "@/lib/client-fetch";
+
+export type Recommendation = "strong_no" | "no" | "yes" | "strong_yes";
+
+export type InterviewScorecard = {
+  id: number;
+  interviewId: number;
+  authorId: number;
+  content: string;
+  rating: number | null;
+  recommendation: Recommendation | null;
+  createdAt: string;
+  updatedAt: string;
+  authorName: string;
+  ratings: { criterionId: number; name: string; rating: number }[];
+};
+
+export type ScorecardMeta = { hasSubmitted: boolean; hiddenCount: number };
 
 export function useInterviewFeedback(interviewId: number) {
   return useQuery({
     queryKey: ["interview-feedback", interviewId],
     queryFn: () =>
-      serverFetch<{ data: Array<{
-        id: number;
-        interviewId: number;
-        content: string;
-        rating: number | null;
-        createdAt: string;
-        updatedAt: string;
-        authorName: string;
-      }> }>(`/interviews/${interviewId}/feedback`),
+      clientFetch<{ data: InterviewScorecard[]; meta?: ScorecardMeta }>(
+        `/interviews/${interviewId}/feedback`,
+      ),
     staleTime: 30_000,
     enabled: !!interviewId,
   });
@@ -24,16 +35,17 @@ export function useAddInterviewFeedback() {
   return useMutation({
     mutationFn: ({
       interviewId,
-      content,
-      rating,
+      ...body
     }: {
       interviewId: number;
       content: string;
       rating?: number | null;
+      recommendation?: Recommendation | null;
+      ratings?: { criterionId: number; rating: number }[];
     }) =>
-      serverFetch(`/interviews/${interviewId}/feedback`, {
+      clientFetch(`/interviews/${interviewId}/feedback`, {
         method: "POST",
-        body: JSON.stringify({ content, rating }),
+        body: JSON.stringify(body),
       }),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({
@@ -54,7 +66,7 @@ export function useDeleteInterviewFeedback() {
       interviewId: number;
       feedbackId: number;
     }) =>
-      serverFetch(`/interviews/${interviewId}/feedback/${feedbackId}`, {
+      clientFetch(`/interviews/${interviewId}/feedback/${feedbackId}`, {
         method: "DELETE",
       }),
     onSuccess: (_data, variables) => {

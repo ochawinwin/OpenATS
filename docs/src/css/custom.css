@@ -4,8 +4,26 @@
  * work well for content-centric websites.
  */
 
+/* Self-hosted fonts, so nothing depends on a third-party request. */
+@font-face {
+  font-family: 'Google Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/GoogleSans-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Google Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/GoogleSans.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 /* You can override the default Infima variables here. */
 :root {
+  --ifm-toc-border-color: #cbd5e1;
   --ifm-color-primary: #1f6870;
   --ifm-color-primary-dark: #195861;
   --ifm-color-primary-darker: #174f56;
@@ -13,19 +31,21 @@
   --ifm-color-primary-light: #287983;
   --ifm-color-primary-lighter: #328994;
   --ifm-color-primary-lightest: #4fa6ad;
-  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ifm-font-family-base: "Google Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
-.navbar { border-bottom: 1px solid #dddcd7; box-shadow: none; background: rgba(255,255,255,.94); }
-.navbar__logo { height: 47px; width: 47px; }
-.navbar__title { color: #171717; font-size: 1.38rem; font-weight: 750; letter-spacing: -.035em; }
-.navbar__link { font-size: .86rem; font-weight: 650; color: #5f5f5a; }.navbar__link:hover, .navbar__link--active { color: #1f6870; }
-.navbar-docs-link { font-size: 1rem; }
-[data-theme='dark'] .navbar-docs-link { color: #fff; }
-.footer { background: #171717; }.footer__title { color: #f4f4ef; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }.footer__link-item { color: #bdbdb5; font-size: .88rem; }.footer__link-item:hover { color: #fff; }
-[data-theme='dark'] .navbar { background: #171717; border-color: #3c3c38; } [data-theme='dark'] .navbar__title { color: #f4f4ef; } [data-theme='dark'] .navbar__link { color: #c2c2bc; }
+.navbar { -webkit-backdrop-filter: saturate(180%) blur(16px); backdrop-filter: saturate(180%) blur(16px); background: rgba(255,255,255,.85); border-bottom: 1px solid #cbd5e1; box-shadow: none; height: 68px; padding: 0 1.5rem; }
+.navbar__logo { height: 40px; margin-right: .3rem; width: 40px; }
+.navbar__title { color: #0f172a; font-size: 1.5rem; line-height: 1; font-weight: 700; letter-spacing: -.035em; }
+.navbar__link { border-radius: 999px; color: #475569; font-size: .88rem; font-weight: 500; padding: .42rem .95rem; transition: background .2s ease, color .2s ease, box-shadow .2s ease; }
+.navbar__link:hover { color: #0f172a; }
+.navbar__link--active, .navbar__link[aria-current='page'] { background: #fff; box-shadow: 0 1px 2px rgba(15,23,42,.08), 0 0 0 1px rgba(15,23,42,.04); color: #0f172a; font-weight: 600; }
+[data-theme='dark'] .navbar { background: rgba(10,10,10,.85); border-color: #666666; } [data-theme='dark'] .navbar__title { color: #f5f5f5; } [data-theme='dark'] .navbar__link { color: #a3a3a3; } [data-theme='dark'] .navbar__link:hover { color: #f5f5f5; } [data-theme='dark'] .navbar__link--active, [data-theme='dark'] .navbar__link[aria-current='page'] { background: #262626; box-shadow: none; color: #f5f5f5; }
+@media screen and (max-width: 996px) {
+  .navbar { padding: 0 1rem; }
+}
 
 .docs-image-trigger { background: transparent; border: 0; cursor: zoom-in; display: block; margin: 1.5rem auto; max-width: 100%; padding: 0; width: 100%; }
 .docs-image-trigger img { display: block; height: auto !important; max-height: none !important; max-width: 100%; width: 100% !important; }
@@ -52,6 +72,15 @@
   --ifm-color-primary-lighter: #a9e5db;
   --ifm-color-primary-lightest: #c2eee7;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  /* Same neutral palette as the navbar and the marketing pages */
+  --ifm-background-color: #0a0a0a;
+  --ifm-background-surface-color: #0a0a0a;
+  --ifm-color-emphasis-200: #1f1f1f;
+}
+
+/* Infima sets this on html[data-theme='dark'], which outranks the block above */
+html[data-theme='dark'] {
+  --ifm-toc-border-color: #666666;
 }
 
 .theme-doc-markdown h1 { font-size: clamp(1.75rem, 2.3vw, 1.9rem) !important; letter-spacing: -.025em; line-height: 1.2; }
@@ -59,3 +88,47 @@
 
 /* The AI copy menu belongs on documentation pages, not the marketing home page. */
 body:has(.openats-landing-page) #copy-page-button-container { display: none !important; }
+/* The blur makes the navbar the containing block of the fixed mobile menu, which would clip it to 68px */
+.navbar.navbar-sidebar--show { -webkit-backdrop-filter: none; backdrop-filter: none; }
+
+/* Blog posts: the same title style as the other pages, and a narrower column for reading */
+.blog-post-page main > .container, .blog-post-page .row > main { padding-top: 1.5rem; }
+.blog-post-page article { margin: 0 auto; max-width: 760px; }
+.blog-post-page article header h1 { font-size: clamp(2.1rem, 4vw, 3rem); font-weight: 500; letter-spacing: -0.02em; line-height: 1.12; }
+.blog-post-page article header time, .blog-post-page article header .margin-vert--md { color: #64748b; font-size: .92rem; }
+.blog-post-page .markdown h2 { color: #0f172a; font-size: 1.6rem; font-weight: 600; letter-spacing: -0.02em; margin-top: 2.5rem; }
+.blog-post-page .markdown { color: #334155; font-size: 1.04rem; line-height: 1.75; }
+.blog-post-page .markdown a { color: #145962; text-decoration: underline; text-underline-offset: 3px; }
+[data-theme='dark'].blog-post-page .markdown { color: #d4d4d4; }
+[data-theme='dark'].blog-post-page .markdown h2 { color: #f5f5f5; }
+[data-theme='dark'].blog-post-page .markdown a { color: #5fb3ad; }
+.blog-post-page .avatar__name a { color: inherit; }
+/* Author: one compact line. The name already links to the profile, so the separate icon row is hidden */
+.blog-post-page article header .avatar { align-items: center; gap: .75rem; margin: 1rem 0 1.75rem; }
+.blog-post-page article header .avatar__photo { height: 40px; width: 40px; }
+.blog-post-page article header .avatar__intro { padding-left: 0; }
+.blog-post-page article header .avatar__name { font-size: .95rem; }
+.blog-post-page article header .avatar__intro small { color: #64748b; font-size: .82rem; }
+.blog-post-page article header [class*='authorSocials'] { display: none; }
+
+/* Inline code, such as `make setup`: a soft chip instead of the default bordered box */
+:root {
+  --ifm-font-family-monospace: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
+}
+.markdown :not(pre) > code {
+  background: rgba(20, 89, 98, 0.07);
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px rgba(20, 89, 98, 0.22);
+  color: #145962;
+  font-size: 1em;
+  font-weight: 500;
+  padding: 0.18em 0.5em;
+  vertical-align: 0.02em;
+}
+.markdown a > code { color: inherit; }
+[data-theme='dark'] .markdown :not(pre) > code {
+  background: rgba(134, 209, 196, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(134, 209, 196, 0.28);
+  color: #86d1c4;
+}

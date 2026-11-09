@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  safeWebsite,
+  shortDescription,
   NO_FILTERS,
   employmentTypesIn,
   filterJobs,
@@ -9,7 +11,7 @@ import {
   postedLabel,
   type CareerJobRow,
   type JobFilters,
-} from "@/app/careers/lib/careers-utils";
+} from "@/app/careers/_lib/careers-utils";
 
 const job = (id: number, over: Partial<CareerJobRow> = {}): CareerJobRow => ({
   id,
@@ -108,5 +110,35 @@ describe("groupByDepartment", () => {
     ]);
     expect(groups.map((g) => g.department)).toEqual(["Design", "Engineering"]);
     expect(groups[1].jobs.map((j) => j.id)).toEqual([3, 1]);
+  });
+});
+
+describe("safeWebsite", () => {
+  it("keeps http and https links", () => {
+    expect(safeWebsite("https://acme.example")).toBe("https://acme.example");
+    expect(safeWebsite("http://acme.example/about")).toBe("http://acme.example/about");
+  });
+
+  it("drops anything else, or nothing", () => {
+    expect(safeWebsite("javascript:alert(1)")).toBeNull();
+    expect(safeWebsite("acme.example")).toBeNull();
+    expect(safeWebsite(null)).toBeNull();
+    expect(safeWebsite("")).toBeNull();
+  });
+});
+
+describe("shortDescription", () => {
+  it("leaves a description that fits alone", () => {
+    expect(shortDescription("We build tools.\nBased in Colombo.\n")).toBeNull();
+  });
+
+  it("cuts a long one at a word", () => {
+    const short = shortDescription("word ".repeat(80))!;
+    expect(short.length).toBeLessThanOrEqual(361);
+    expect(short.endsWith("word…")).toBe(true);
+  });
+
+  it("cuts one with many short lines", () => {
+    expect(shortDescription("one\ntwo\nthree\nfour")).toBe("one\ntwo\nthree…");
   });
 });

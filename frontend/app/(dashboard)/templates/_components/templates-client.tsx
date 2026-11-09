@@ -16,10 +16,12 @@ import { TemplatesTable } from "./templates-table";
 import { TemplateTypePicker } from "./type-picker";
 import { TemplateDeleteDialog } from "./delete-dialog";
 import { DuplicateTemplateDialog } from "./duplicate-dialog";
+import { TemplatesTabs, type TemplatesTab } from "./templates-tabs";
+import { AutomaticEmailsList } from "./automatic-emails-list";
 
 const PAGE_LIMIT = 15;
 
-export default function TemplatesPageClient() {
+export default function TemplatesPageClient({ tab = "yours" }: { tab?: TemplatesTab }) {
   const router = useRouter();
 
   // ── Filter State ───────────────────────────────────────────
@@ -55,7 +57,7 @@ export default function TemplatesPageClient() {
   const [pickedType, setPickedType] = useState<string | null>(null);
 
   const handleOpenTypePicker = useCallback(() => {
-    // Most templates are emails, so start there; one click to change it.
+    // Default to email
     setPickedType("email");
     setTypePickerOpen(true);
   }, []);
@@ -67,8 +69,7 @@ export default function TemplatesPageClient() {
     }
   }, [pickedType, router]);
 
-  // ── Duplicate ──────────────────────────────────────────────
-  // Asks for a name first, so a copy is never made by accident or left unnamed.
+  // Duplicate: ask for a name first
   const [duplicateTarget, setDuplicateTarget] = useState<Template | null>(null);
 
   const handleConfirmDuplicate = useCallback(
@@ -103,7 +104,13 @@ export default function TemplatesPageClient() {
   const handleDeleteSelected = useCallback(
     async (ids: number[]) => {
       if (ids.length === 0) return false;
-      await bulkDeleteMutation.mutateAsync(ids);
+      try {
+        await bulkDeleteMutation.mutateAsync(ids);
+        toast.success(`Deleted ${ids.length} ${ids.length === 1 ? "template" : "templates"}`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to delete the templates");
+        return false;
+      }
     },
     [bulkDeleteMutation],
   );
@@ -115,7 +122,11 @@ export default function TemplatesPageClient() {
   const handleConfirmDelete = useCallback(() => {
     if (deleteId === null) return;
     deleteMutation.mutate(deleteId, {
-      onSuccess: () => setDeleteId(null),
+      onSuccess: () => {
+        toast.success("Template deleted");
+        setDeleteId(null);
+      },
+      onError: (error) => toast.error(error.message || "Failed to delete the template"),
     });
   }, [deleteId, deleteMutation]);
 
@@ -131,30 +142,39 @@ export default function TemplatesPageClient() {
   return (
     <div className="flex flex-1 flex-col min-h-0 bg-white dark:bg-neutral-950">
       <TemplatesHeader onNewTemplate={handleOpenTypePicker} />
+      <TemplatesTabs tab={tab} />
 
-      <div className="flex-shrink-0">
-        <TemplatesFilters
-          search={search}
-          onSearchChange={handleSearchChange}
-          filterType={filterType}
-          onFilterTypeChange={handleTypeChange}
-          onClear={handleClearFilters}
-        />
-      </div>
+      {tab === "automatic" ? (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <AutomaticEmailsList />
+        </div>
+      ) : (
+        <>
+          <div className="flex-shrink-0">
+            <TemplatesFilters
+              search={search}
+              onSearchChange={handleSearchChange}
+              filterType={filterType}
+              onFilterTypeChange={handleTypeChange}
+              onClear={handleClearFilters}
+            />
+          </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <TemplatesTable
-          templates={templates}
-          isLoading={isLoading}
-          onRowClick={(template) => router.push(`/templates/${template.id}/edit`)}
-          onDuplicate={setDuplicateTarget}
-          onDelete={setDeleteId}
-          onDeleteSelected={handleDeleteSelected}
-          isDeletingSelected={bulkDeleteMutation.isPending}
-          pagination={pagination}
-          onPageChange={setPage}
-        />
-      </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <TemplatesTable
+              templates={templates}
+              isLoading={isLoading}
+              onRowClick={(template) => router.push(`/templates/${template.id}/edit`)}
+              onDuplicate={setDuplicateTarget}
+              onDelete={setDeleteId}
+              onDeleteSelected={handleDeleteSelected}
+              isDeletingSelected={bulkDeleteMutation.isPending}
+              pagination={pagination}
+              onPageChange={setPage}
+            />
+          </div>
+        </>
+      )}
 
       <TemplateTypePicker
         isOpen={typePickerOpen}

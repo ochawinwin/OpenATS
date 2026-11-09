@@ -330,8 +330,11 @@ const stats = {
   fileFailures: [] as string[],
 };
 
-/** Download a (short-lived, signed) TalentLyft file and store it in R2 under a deterministic key. */
-async function mirrorFile(file: TlFile, keyBase: string): Promise<string | null> {
+/**
+ * Download a (short-lived, signed) TalentLyft file and store it in the PRIVATE R2 bucket under a
+ * deterministic key. Returns the key: OpenATS keeps CVs by key (candidates.resume_key), never by URL.
+ */
+async function mirrorFile(file: TlFile, keyBase: string, folder = "resumes"): Promise<string | null> {
   const res = await fetch(file.Url);
   if (!res.ok) {
     stats.fileFailures.push(`${keyBase}: download ${res.status}`);
@@ -340,18 +343,17 @@ async function mirrorFile(file: TlFile, keyBase: string): Promise<string | null>
   const buf = Buffer.from(await res.arrayBuffer());
   const mime = file.ContentType ?? res.headers.get("content-type") ?? "application/octet-stream";
   const ext = EXT_BY_MIME[mime] ?? (/\.[a-z0-9]{2,5}$/i.exec(file.FileName)?.[0]?.toLowerCase() ?? "");
-  const key = `resumes/${keyBase}${ext}`;
+  const key = `${folder}/${keyBase}${ext}`;
   await r2Client().send(
     new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME!,
+      Bucket: process.env.R2_PRIVATE_BUCKET_NAME!,
       Key: key,
       Body: buf,
       ContentType: mime,
       ContentDisposition: mime === "application/pdf" ? "inline" : "attachment",
     }),
   );
-  const base = process.env.R2_PUBLIC_URL!.replace(/\/$/, "");
-  return `${base}/${key}`;
+  return key;
 }
 
 // ───────────────────────── per-job migration ─────────────────────────
@@ -364,7 +366,7 @@ type CandidatePlan = {
   email: string;
   mockEmail: boolean;
   phone: string | null;
-  resumeUrl: string | null;
+  resumeKey: string | null;
   stageName: string;
   status: "active" | "rejected" | "offered" | "hired" | "withdrawn";
   appliedAt: Date;
@@ -473,9 +475,9 @@ async function migrateJob(
     ]);
     const mine = activities.filter((a) => a.Application?.Id === app.Id || a.Job?.Id === job.Id);
 
-    let resumeUrl: string | null = null;
-    if (detail.Resume && mirror) resumeUrl = await mirrorFile(detail.Resume, `talentlyft-${app.Id}-resume`);
-    if (resumeUrl) stats.resumesUploaded++;
+    let resumeKey: string | null = null;
+    if (detail.Resume && mirror) resumeKey = await mirrorFile(detail.Resume, `talentlyft-${app.Id}-resume`);
+    if (resumeKey) stats.resumesUploaded++;
 
     const answers: CandidatePlan["answers"] = [];
     for (const a of detail.Answers ?? []) {
@@ -483,10 +485,11 @@ async function migrateJob(
       let text = a.Answer.Response?.trim() ?? "";
       if (!text && a.Answer.File) {
         if (mirror) {
-          const url = await mirrorFile(a.Answer.File, `talentlyft-${app.Id}-q${a.Id}`);
-          if (url) {
+          // Only CVs can be opened from OpenATS; other files are kept in the private bucket by key.
+          const key = await mirrorFile(a.Answer.File, `talentlyft-${app.Id}-q${a.Id}`, "talentlyft-files");
+          if (key) {
             stats.answerFilesUploaded++;
-            text = url;
+            text = `${a.Answer.File.FileName} (private storage: ${key})`;
           }
         } else {
           text = `(file) ${a.Answer.File.FileName}`;
@@ -542,10 +545,10 @@ async function migrateJob(
     for (const att of detail.Attachments ?? []) {
       let url: string | null = null;
       if (mirror) {
-        url = await mirrorFile(att, `talentlyft-${app.Id}-att${att.Id ?? attachmentLines.length}`);
+        url = await mirrorFile(att, `talentlyft-${app.Id}-att${att.Id ?? attachmentLines.length}`, "talentlyft-files");
         if (url) stats.attachmentsUploaded++;
       }
-      attachmentLines.push(`- ${att.FileName}${url ? `: ${url}` : mirror ? " (upload failed)" : ""}`);
+      attachmentLines.push(`- ${att.FileName}${url ? ` (private storage: ${url})` : mirror ? " (upload failed)" : ""}`);
     }
 
     const noteLines: string[] = [
@@ -586,7 +589,7 @@ async function migrateJob(
       email,
       mockEmail: !realEmail,
       phone: (c.PhoneNumbers.find((p) => p.IsPrimary) ?? c.PhoneNumbers[0])?.Value?.trim().slice(0, 50) ?? null,
-      resumeUrl,
+      resumeKey,
       stageName,
       status,
       appliedAt,
@@ -760,7 +763,7 @@ async function migrateJob(
             lastName: plan.lastName,
             email: plan.email,
             phone: plan.phone,
-            resumeUrl: plan.resumeUrl,
+            resumeKey: plan.resumeKey,
             jobId: newJob.id,
             currentStageId: rejected ? null : currentId,
             status: plan.status,
@@ -840,7 +843,7 @@ async function migrateJob(
 
 async function main() {
   const need = ["TALENTLYFT_API_KEY", "DATABASE_URL"];
-  if (APPLY && !SKIP_RESUMES) need.push("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME", "R2_PUBLIC_URL");
+  if (APPLY && !SKIP_RESUMES) need.push("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_PRIVATE_BUCKET_NAME");
   const missing = need.filter((k) => !process.env[k]);
   if (missing.length) throw new Error(`Missing env: ${missing.join(", ")}`);
   if (APPLY && !CREATED_BY_EMAIL) throw new Error("--created-by=<email> is required with --apply");

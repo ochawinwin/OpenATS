@@ -3,15 +3,15 @@ import { validateEnv } from "./config/env";
 
 validateEnv();
 
-import { startCvAnalysisWorker } from "./queues/cv-analysis/worker";
+import { startAllWorkers } from "./queues/start-workers";
 import logger from "./utils/logger";
 
-const worker = startCvAnalysisWorker();
-logger.info("CV analysis worker process started");
+const workers = startAllWorkers();
+logger.info("Background worker started: CV text, CV file deletion and AI CV analysis");
 
 async function shutdown(signal: string) {
   logger.info(`[worker] received ${signal}, shutting down gracefully...`);
-  await worker.close();
+  await Promise.all(workers.map((worker) => worker.close()));
   process.exit(0);
 }
 

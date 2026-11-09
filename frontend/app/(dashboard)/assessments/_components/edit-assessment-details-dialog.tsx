@@ -21,6 +21,7 @@ export interface AssessmentDetails {
   title: string;
   description: string;
   timeLimit: number;
+  linkExpiryDays: number;
 }
 
 interface EditAssessmentDetailsDialogProps {
@@ -46,6 +47,7 @@ function DetailsForm({
   const [title, setTitle] = useState(details.title);
   const [description, setDescription] = useState(details.description);
   const [timeLimit, setTimeLimit] = useState(String(details.timeLimit));
+  const [linkExpiryDays, setLinkExpiryDays] = useState(String(details.linkExpiryDays));
 
   const handleSave = () => {
     const limit = Number(timeLimit);
@@ -53,10 +55,15 @@ function DetailsForm({
     if (!Number.isInteger(limit) || limit < 1) {
       return toast.warning("Time limit must be a whole number of minutes.");
     }
+    const days = Number(linkExpiryDays);
+    if (!Number.isInteger(days) || days < 1 || days > 90) {
+      return toast.warning("Link validity must be a whole number of days, from 1 to 90.");
+    }
     onSave({
       title: title.trim(),
       description: description.trim(),
       timeLimit: limit,
+      linkExpiryDays: days,
     });
   };
 
@@ -106,6 +113,7 @@ function DetailsForm({
             className="resize-y border-slate-300 bg-gray-100 shadow-none dark:border-neutral-600 dark:bg-neutral-800"
           />
         </div>
+        <div className="flex gap-4">
         <div className="w-44">
           <Label
             htmlFor={`${uid}-time-limit`}
@@ -121,6 +129,24 @@ function DetailsForm({
             onChange={(e) => setTimeLimit(e.target.value)}
             className="h-10 rounded-md border-slate-300 bg-gray-100 shadow-none dark:border-neutral-600 dark:bg-neutral-800"
           />
+        </div>
+        <div className="w-44">
+          <Label
+            htmlFor={`${uid}-link-expiry`}
+            className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-neutral-300"
+          >
+            Link valid for (days)
+          </Label>
+          <Input
+            id={`${uid}-link-expiry`}
+            type="number"
+            min="1"
+            max="90"
+            value={linkExpiryDays}
+            onChange={(e) => setLinkExpiryDays(e.target.value)}
+            className="h-10 rounded-md border-slate-300 bg-gray-100 shadow-none dark:border-neutral-600 dark:bg-neutral-800"
+          />
+        </div>
         </div>
       </div>
 
@@ -153,8 +179,7 @@ export function EditAssessmentDetailsDialog({
   details,
   onSaved,
 }: EditAssessmentDetailsDialogProps) {
-  // The mutation lives here, not in the form: this component stays mounted, so
-  // the completion callbacks still run even if the form were unmounted.
+  // Keep the mutation here so callbacks run after the form closes
   const updateAssessment = useUpdateAssessment(assessmentId);
 
   const handleSave = (next: AssessmentDetails) => {
@@ -176,13 +201,13 @@ export function EditAssessmentDetailsDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        // Ignore close requests (X button, Escape, outside click) mid-save.
+        // Don't close while saving
         if (!nextOpen && updateAssessment.isPending) return;
         onOpenChange(nextOpen);
       }}
     >
       <DialogContent className="max-w-md gap-5 border-slate-200 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-900">
-        {/* Mounted only while open, so the fields start from the saved values each time. */}
+        {/* Mount only when open so fields reset */}
         <DetailsForm
           details={details}
           isPending={updateAssessment.isPending}

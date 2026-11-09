@@ -5,6 +5,9 @@ import { cleanObject as clean, asEnum } from "../../utils/object.utils";
 import logger from "../../utils/logger";
 import { getErrorCode, getErrorMessage} from "../../utils/error.utils";
 import { jobs } from "../../db/schema";
+import { scoringService } from "../scoring/scoring.service";
+import { canViewJob, canViewJobs, teamScope } from "../../shared/auth/job-access";
+import { sanitizeJobDescription } from "./job-description";
 
 const employmentTypeEnum = z.enum([
   "full_time",
@@ -21,6 +24,20 @@ const payFrequencyEnum = z.enum([
   "monthly",
   "yearly",
 ]);
+
+const weight = z.number().int().min(0).max(100);
+const scoreWeightsShape = {
+  scoreWeightQuestions: weight.optional(),
+  scoreWeightAssessment: weight.optional(),
+  scoreWeightRating: weight.optional(),
+  scoreWeightInterview: weight.optional(),
+};
+/** Weights come as a set: all four or none, and not all zero. */
+const weightsValid = (d: Partial<Record<keyof typeof scoreWeightsShape, number | undefined>>) => {
+  const values = Object.keys(scoreWeightsShape).map((k) => d[k as keyof typeof scoreWeightsShape]);
+  if (values.every((v) => v === undefined)) return true;
+  return values.every((v) => v !== undefined) && values.some((v) => (v ?? 0) > 0);
+};
 
 const createJobSchema = z
   .object({
@@ -39,7 +56,9 @@ const createJobSchema = z
     status: z
       .enum(["draft", "inactive", "published", "closed", "archived"])
       .optional(),
+    ...scoreWeightsShape,
   })
+  .refine(weightsValid, { message: "Send all four score weights, at least one above 0" })
   .refine(
     (data) => {
       if (data.salaryType && (!data.currency || !data.payFrequency))
@@ -56,7 +75,9 @@ const createJobSchema = z
     },
   );
 
-const updateJobSchema = z.object({
+const updateJobSchema = z
+  .object({
+  ...scoreWeightsShape,
   title: z.union([z.string().min(1).max(255), z.undefined()]).optional(),
   departmentId: z
     .union([z.number().int().positive(), z.undefined()])
@@ -74,7 +95,8 @@ const updateJobSchema = z.object({
   status: z
     .enum(["draft", "inactive", "published", "closed", "archived"])
     .optional(),
-});
+  })
+  .refine(weightsValid, { message: "Send all four score weights, at least one above 0" });
 
 export const listPublishedCareersJobs = async (
   _req: Request,
@@ -92,7 +114,7 @@ export const listPublishedCareersJobs = async (
 export const getAllJobs = async (req: Request, res: Response) => {
   try {
     const { page, limit, search, status, departmentId } = req.query;
-    const teamUserId = req.user.role === "interviewer" ? req.user.id : undefined;
+    const teamUserId = teamScope(req.user);
 
     if (page !== undefined) {
       const result = await jobService.getPaginated({
@@ -122,11 +144,36 @@ const bulkDeleteJobsSchema = z.object({
   ids: z.array(z.number().int().positive()).min(1),
 });
 
+const deleteSummarySchema = z.array(z.number().int().positive()).min(1).max(200);
+
+export const getJobDeleteSummary = async (req: Request, res: Response) => {
+  try {
+    const parsed = deleteSummarySchema.safeParse(String(req.query.ids ?? "").split(",").map(Number));
+    if (!parsed.success) {
+      res.status(400).json({ error: "Validation failed" });
+      return;
+    }
+    if (!(await canViewJobs(req.user, parsed.data))) {
+      res.status(403).json({ error: "You can only delete jobs you are on the hiring team of" });
+      return;
+    }
+    res.status(200).json({ data: await jobService.getDeleteSummary(parsed.data) });
+  } catch (error) {
+    logger.error(`Failed to fetch job delete summary - user ${req.user?.id}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to count what the delete would remove" });
+  }
+};
+
 export const bulkDeleteJobs = async (req: Request, res: Response) => {
   try {
     const parsed = bulkDeleteJobsSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Validation failed", details: parsed.error.flatten().fieldErrors });
+      return;
+    }
+    if (!(await canViewJobs(req.user, parsed.data.ids))) {
+      logger.warn(`[access] user ${req.user.id} denied bulk deleting jobs ${parsed.data.ids.join(",")}`);
+      res.status(403).json({ error: "You can only delete jobs you are on the hiring team of" });
       return;
     }
     logger.warn(`Bulk job deletion requested: ids=${parsed.data.ids.join(",")} by user ${req.user?.id}`);
@@ -152,12 +199,9 @@ export const getJobById = async (req: Request, res: Response) => {
       return;
     }
 
-    if (req.user.role === "interviewer") {
-      const onTeam = result.hiringTeam?.some((m: { userId: number }) => m.userId === req.user.id);
-      if (!onTeam) {
-        res.status(403).json({ error: "Access restricted to assigned jobs" });
-        return;
-      }
+    if (!(await canViewJob(req.user, id))) {
+      res.status(403).json({ error: "Access restricted to assigned jobs" });
+      return;
     }
 
     res.status(200).json({ data: result });
@@ -181,8 +225,31 @@ export const getPublicJobById = async (req: Request, res: Response) => {
       return;
     }
 
-    const { hiringTeam, pipelineStages, createdBy, ...data } = result;
-    res.status(200).json({ data });
+    // Named one by one, so a column added to jobs later is not public until someone decides it is.
+    res.status(200).json({
+      data: {
+        id: result.id,
+        slug: result.slug,
+        title: result.title,
+        departmentId: result.departmentId,
+        employmentType: result.employmentType,
+        location: result.location,
+        // Cleaned again on the way out. The careers page puts this straight into its HTML, so a
+        // description saved before cleaning existed (or written into the database directly)
+        // still cannot carry a script to the public.
+        description: sanitizeJobDescription(result.description),
+        salaryType: result.salaryType,
+        currency: result.currency,
+        payFrequency: result.payFrequency,
+        salaryFixed: result.salaryFixed,
+        salaryMin: result.salaryMin,
+        salaryMax: result.salaryMax,
+        status: result.status,
+        skills: result.skills,
+        createdAt: result.createdAt,
+        updatedAt: result.updatedAt,
+      },
+    });
   } catch (error) {
     logger.error(`Failed to fetch public job id=${req.params.id}: ${getErrorMessage(error)}`);
     res.status(500).json({ error: "Failed to fetch job" });
@@ -199,6 +266,10 @@ export const getJobBySlug = async (req: Request, res: Response) => {
     const result = await jobService.getBySlug(slug);
     if (!result) {
       res.status(404).json({ error: "Job not found" });
+      return;
+    }
+    if (!(await canViewJob(req.user, result.id))) {
+      res.status(403).json({ error: "Access restricted to assigned jobs" });
       return;
     }
     res.status(200).json({ data: result });
@@ -272,6 +343,12 @@ export const updateJob = async (req: Request, res: Response) => {
       return;
     }
 
+    if (Object.keys(scoreWeightsShape).some((k) => k in filteredData)) {
+      void scoringService
+        .recomputeJob(id)
+        .catch((e) => logger.error(`Failed to re-score job ${id}: ${getErrorMessage(e)}`));
+    }
+
     logger.info(`Job updated: id=${id}, status=${result.status}, updatedBy=${req.user?.id}`);
     res.status(200).json({ data: result });
   } catch (error) {
@@ -329,6 +406,30 @@ export const getAssessments = async (req: Request, res: Response) => {
   }
 };
 
+const clampPercent = (v: unknown) => Math.min(100, Math.max(0, Math.round(Number(v)) || 0));
+
+export const updateAssessmentPassMark = async (req: Request, res: Response) => {
+  try {
+    const jobId = parseInt((req.params.id ?? "").toString());
+    const attachmentId = parseInt((req.params.attachmentId ?? "").toString());
+    const parsed = z.object({ passMark: z.number().int().min(0).max(100) }).safeParse(req.body);
+    if (isNaN(jobId) || isNaN(attachmentId) || !parsed.success) {
+      res.status(400).json({ error: "A pass mark between 0 and 100 is required" });
+      return;
+    }
+    const result = await jobService.updateAttachmentPassMark(jobId, attachmentId, parsed.data.passMark);
+    if (!result) {
+      res.status(404).json({ error: "Attachment not found" });
+      return;
+    }
+    void scoringService.regradeJob(jobId).catch((e) => logger.error(`Failed to regrade job ${jobId}: ${getErrorMessage(e)}`));
+    res.status(200).json({ data: result });
+  } catch (error) {
+    logger.error(`Failed to update pass mark - user ${req.user?.id}: ${getErrorMessage(error)}`);
+    res.status(500).json({ error: "Failed to update pass mark" });
+  }
+};
+
 export const attachAssessment = async (req: Request, res: Response) => {
   try {
     const jobId = parseInt((req.params.id ?? "").toString());
@@ -337,7 +438,7 @@ export const attachAssessment = async (req: Request, res: Response) => {
       return;
     }
 
-    const { assessmentId, triggerStageId } = req.body;
+    const { assessmentId, triggerStageId, passMark } = req.body;
     if (!assessmentId || !triggerStageId) {
       res
         .status(400)
@@ -349,6 +450,7 @@ export const attachAssessment = async (req: Request, res: Response) => {
       jobId,
       assessmentId: parseInt(assessmentId),
       triggerStageId: parseInt(triggerStageId),
+      ...(passMark !== undefined && { passMark: clampPercent(passMark) }),
     });
 
     logger.info(`Assessment attached to job: jobId=${jobId}, assessmentId=${assessmentId}, triggerStageId=${triggerStageId} by user ${req.user?.id}`);

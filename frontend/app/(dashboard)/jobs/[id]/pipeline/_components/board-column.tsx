@@ -6,14 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { BoardCandidate, PipelineStage } from "@/types";
-import { dropIndex } from "../lib/board-utils";
+import { dropIndex, isSameSlot, slotLineY } from "../_lib/board-utils";
 import { BoardCard, CARD_TYPE, type DragItem } from "./board-card";
 
-/**
- * Cards drawn per column until "Show more" is pressed. Every drawn card is also a drag source,
- * and a drag start makes each of them re-check itself, so a 500-card column froze the page for
- * seconds. Search and the totals still cover every card; only the drawing is limited.
- */
+/** Cards shown per column before Show more. Too many makes drag slow */
 export const PAGE_SIZE = 50;
 
 const STAGE_DOT: Record<PipelineStage["stageType"], string> = {
@@ -27,24 +23,22 @@ interface BoardColumnProps {
   stages: PipelineStage[];
   /** The cards shown, after any search. */
   candidates: BoardCandidate[];
-  /** How many the stage holds in all, so a search can say "2 of 5". */
+  /** Total in the stage, for "2 of 5" */
   totalCount: number;
   now: number;
   isLoading: boolean;
   movingIds: ReadonlySet<number>;
-  /** A search is active, so the cards shown are highlighted as matches. */
+  /** Search is on */
   isSearching: boolean;
   selectedIds: ReadonlySet<number>;
   selectionMode: boolean;
   onToggleSelect: (id: number) => void;
-  /** Selects, or deselects when all are already selected, every card the column holds. */
+  /** Select or deselect all cards in the column */
   onToggleColumn: (candidateIds: number[]) => void;
   onOpen: (id: number) => void;
   onMove: (candidateId: number, stageId: number, index: number) => void;
 }
 
-/** Where the dragged card would land: the slot, and the line's offset inside the column body. */
-type Slot = { index: number; top: number };
 
 export const BoardColumn = memo(function BoardColumn({
   stage,
@@ -63,42 +57,48 @@ export const BoardColumn = memo(function BoardColumn({
   onMove,
 }: BoardColumnProps) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  const [slot, setSlot] = useState<Slot | null>(null);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const shown = candidates.length > limit ? candidates.slice(0, limit) : candidates;
   const hiddenCount = candidates.length - shown.length;
 
-  /** Reads the cards as drawn right now, so the slot is right even after the column scrolled. */
-  const slotAt = useCallback((pointerY: number): Slot | null => {
-    const body = bodyRef.current;
-    if (!body) return null;
-    const bodyTop = body.getBoundingClientRect().top;
-    const rects = [...body.querySelectorAll<HTMLElement>("[data-board-card]")].map((el) =>
-      el.getBoundingClientRect(),
-    );
-    const index = dropIndex(rects, pointerY);
-    const edge = rects[index]?.top ?? (rects.length ? rects[rects.length - 1].bottom + 8 : bodyTop + 12);
-    return { index, top: edge - 4 - bodyTop + body.scrollTop };
-  }, []);
+  /** Where the line sits in the column body, null when the drop would change nothing */
+  const [lineTop, setLineTop] = useState<number | null>(null);
+
+  const cardRects = useCallback(
+    () =>
+      [...(bodyRef.current?.querySelectorAll<HTMLElement>("[data-board-card]") ?? [])].map((el) =>
+        el.getBoundingClientRect(),
+      ),
+    [],
+  );
 
   const [{ isOver }, dropRef] = useDrop<DragItem, void, { isOver: boolean }>(
     {
       accept: CARD_TYPE,
-      hover: (_item, monitor) => {
+      hover: (item, monitor) => {
         const y = monitor.getClientOffset()?.y;
-        if (y === undefined) return;
-        const next = slotAt(y);
-        setSlot((prev) => (prev && next && prev.index === next.index ? prev : next));
+        const body = bodyRef.current;
+        if (y === undefined || !body) return;
+        const rects = cardRects();
+        const draggedIndex = shown.findIndex((c) => c.id === item.id);
+        const slot = dropIndex(rects, y, draggedIndex);
+        const lineY = isSameSlot(slot, draggedIndex) ? null : slotLineY(rects, slot);
+        setLineTop(
+          lineY === null ? null : lineY - body.getBoundingClientRect().top + body.scrollTop,
+        );
       },
       drop: (item, monitor) => {
         const y = monitor.getClientOffset()?.y;
-        const target = y === undefined ? null : slotAt(y);
-        setSlot(null);
-        onMove(item.id, stage.id, target?.index ?? shown.length);
+        const draggedIndex = shown.findIndex((c) => c.id === item.id);
+        onMove(
+          item.id,
+          stage.id,
+          y === undefined ? shown.length : dropIndex(cardRects(), y, draggedIndex),
+        );
       },
       collect: (monitor) => ({ isOver: monitor.isOver() }),
     },
-    [slotAt, onMove, stage.id, shown.length],
+    [cardRects, onMove, stage.id, shown],
   );
 
   const attach = useCallback(
@@ -109,7 +109,6 @@ export const BoardColumn = memo(function BoardColumn({
     [dropRef],
   );
 
-  const showLine = isOver && slot !== null;
   const selectedInColumn = candidates.reduce((n, c) => n + (selectedIds.has(c.id) ? 1 : 0), 0);
   const allSelected = candidates.length > 0 && selectedInColumn === candidates.length;
 
@@ -143,12 +142,20 @@ export const BoardColumn = memo(function BoardColumn({
 
       <div
         ref={attach}
-        className={`relative min-h-0 flex-1 space-y-2 overflow-y-auto rounded-lg border p-2 [scrollbar-width:thin] ${
+        className={`relative min-h-0 flex-1 space-y-2 overflow-y-auto rounded-lg border p-2 transition-colors duration-200 [scrollbar-width:thin] ${
           isOver
             ? "border-theme bg-theme/5"
             : "border-slate-300 bg-slate-100/60 dark:border-neutral-700 dark:bg-neutral-900/40"
         }`}
       >
+        {isOver && lineTop !== null && (
+          <div
+            aria-hidden
+            data-drop-line
+            style={{ top: lineTop }}
+            className="pointer-events-none absolute inset-x-2 z-10 h-0.5 -translate-y-1/2 rounded-full bg-theme"
+          />
+        )}
         {isLoading ? (
           <>
             <Skeleton className="h-14 w-full rounded-md" />
@@ -189,14 +196,6 @@ export const BoardColumn = memo(function BoardColumn({
           >
             Show {Math.min(PAGE_SIZE, hiddenCount)} more ({hiddenCount} not shown)
           </Button>
-        )}
-
-        {showLine && shown.length > 0 && (
-          <span
-            aria-hidden
-            style={{ top: slot.top }}
-            className="pointer-events-none absolute inset-x-2 h-0.5 rounded-full bg-theme"
-          />
         )}
       </div>
     </section>

@@ -3,7 +3,11 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ArrowRight02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+import {
+  ArrowRight01Icon,
+  ArrowUpRight01Icon,
+  Search01Icon,
+} from "@hugeicons/core-free-icons";
 
 import { Input } from "@/components/ui/input";
 import {
@@ -24,87 +28,128 @@ import {
   hasActiveFilters,
   locationsIn,
   postedLabel,
+  safeWebsite,
+  shortDescription,
   type CareerJobRow,
   type JobFilters,
-} from "../lib/careers-utils";
+} from "../_lib/careers-utils";
 
-// One height for the search field and the dropdowns: the 32px the dashboard filter bars use.
-// The dark-theme border has to be matched by a dark-theme focus border, or focusing a field
-// in dark mode shows nothing.
+// The search is the main control here, so a little taller than the dashboard filters
 const fieldCls =
-  "h-8! border border-slate-300 bg-slate-100 text-slate-900 shadow-none placeholder:text-slate-400 focus-visible:border-neutral-900 focus-visible:ring-0 dark:border-neutral-700 dark:bg-neutral-800/60 dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus-visible:border-neutral-300";
+  "h-12! text-base! border border-slate-300 bg-white text-slate-900 shadow-none placeholder:text-slate-400 focus-visible:border-neutral-900 focus-visible:ring-0 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus-visible:border-neutral-300";
 
-function JobRow({ job, now }: { job: CareerJobRow; now: number }) {
-  const meta = [
-    employmentLabel(job.employmentType),
-    job.location,
-    postedLabel(job.createdAt, now),
-  ].filter(Boolean);
+/** The width everything on the page lines up to */
+export const pageWidth = "mx-auto w-full max-w-[1200px] px-6 sm:px-8";
+
+function JobRow({
+  job,
+  now,
+  nested,
+}: {
+  job: CareerJobRow;
+  now: number;
+  // Under a department heading, so one level lower
+  nested: boolean;
+}) {
+  const Title = nested ? "h4" : "h3";
 
   return (
     <li>
-      {/* The whole card is the link; border, fill and arrow ease in together on hover. */}
+      {/* Whole card is the link. Fixed columns, so roles can be compared down the page */}
       <Link
         href={`/careers/${job.id}`}
-        className="group flex items-center justify-between gap-4 rounded-xl border border-slate-300 bg-white px-5 py-4 transition-[border-color,background-color,box-shadow] duration-200 ease-out hover:border-neutral-900 hover:bg-slate-50 hover:shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 motion-reduce:transition-none dark:border-neutral-700 dark:bg-neutral-900 dark:hover:border-neutral-300 dark:hover:bg-neutral-800/70 dark:focus-visible:outline-neutral-100"
+        className="group grid gap-x-6 rounded-lg border border-slate-200 bg-white px-6 py-5 transition-colors duration-150 hover:border-theme focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900 motion-reduce:transition-none sm:grid-cols-[minmax(0,1fr)_16rem_8rem_1.25rem] sm:items-center dark:border-neutral-800 dark:bg-neutral-900 dark:hover:border-neutral-500 dark:focus-visible:outline-neutral-100"
       >
         <div className="min-w-0">
-          <h3 className="text-[17px] font-semibold leading-snug text-slate-900 dark:text-neutral-100">
+          <Title className="text-lg font-semibold leading-snug text-slate-900 transition-colors duration-150 group-hover:text-theme motion-reduce:transition-none dark:text-neutral-100 dark:group-hover:text-neutral-100">
             {job.title}
-          </h3>
+          </Title>
           <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
-            {meta.join(" · ")}
+            {postedLabel(job.createdAt, now)}
           </p>
         </div>
-        <span
+        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-0.5 text-base text-slate-700 sm:contents dark:text-neutral-300">
+          <span className="min-w-0">{job.location}</span>
+          <span>{employmentLabel(job.employmentType)}</span>
+        </div>
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
           aria-hidden
-          className="relative isolate inline-flex h-9 shrink-0 items-center gap-1.5 overflow-hidden rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-800 transition-colors duration-300 ease-out group-hover:border-neutral-900 motion-reduce:transition-none dark:border-neutral-600 dark:text-neutral-200 dark:group-hover:border-neutral-100"
-        >
-          {/* The dark fill sweeps in from the left behind the label. */}
-          <span className="absolute inset-0 -z-10 origin-left scale-x-0 rounded-full bg-neutral-900 transition-transform duration-300 ease-out group-hover:scale-x-100 motion-reduce:transition-none dark:bg-neutral-100" />
-          {/* The label turns once the fill has reached it, so it is never grey on grey. */}
-          <span className="transition-colors delay-100 duration-150 ease-out group-hover:text-white motion-reduce:transition-none dark:group-hover:text-neutral-900">
-            Apply
-          </span>
-          <HugeiconsIcon
-            icon={ArrowRight02Icon}
-            className="size-4 transition-[transform,color] delay-100 duration-300 ease-out group-hover:translate-x-0.5 group-hover:text-white motion-reduce:transition-none dark:group-hover:text-neutral-900"
-            strokeWidth={1.75}
-          />
-        </span>
+          className="hidden size-5 text-slate-400 transition-colors duration-150 group-hover:text-theme motion-reduce:transition-none sm:block dark:text-neutral-500 dark:group-hover:text-neutral-200"
+          strokeWidth={1.75}
+        />
       </Link>
     </li>
   );
 }
 
-export type CareersBrand = { name: string; logoUrl: string | null } | null;
+export type CareersBrand = {
+  name: string;
+  logoUrl: string | null;
+  description: string | null;
+  website: string | null;
+} | null;
 
-/** The company's logo (or name) and "Open roles" side by side on one line. */
-export function CareersTitleBar({ brand }: { brand: CareersBrand }) {
+/** Plain text from Settings, any length; keep the line breaks it was written with. */
+function CompanyDescription({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const short = shortDescription(text);
+
   return (
-    <div className="flex min-w-0 items-center gap-4">
-      {brand?.logoUrl ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={brand.logoUrl}
-          alt={brand.name}
-          className="h-12 w-auto max-w-[200px] object-contain object-left"
-        />
-      ) : brand?.name ? (
-        <p className="text-base font-semibold text-slate-900 dark:text-neutral-100">
-          {brand.name}
-        </p>
-      ) : null}
-      {brand && (
-        <span
-          aria-hidden
-          className="h-8 w-px shrink-0 bg-slate-300 dark:bg-neutral-700"
-        />
+    <p className="mt-3 max-w-5xl whitespace-pre-line text-[17px] leading-relaxed text-slate-600 dark:text-neutral-400">
+      {expanded || !short ? text : short}
+      {short && (
+        <>
+          {" "}
+          <button
+            type="button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+            className="cursor-pointer font-medium text-slate-800 underline underline-offset-4 hover:text-slate-950 dark:text-neutral-200 dark:hover:text-white"
+          >
+            {expanded ? "See less" : "See more"}
+          </button>
+        </>
       )}
-      <h1 className="text-2xl font-semibold leading-tight text-slate-900 dark:text-neutral-100">
-        Open roles
-      </h1>
-    </div>
+    </p>
+  );
+}
+
+/** Who the company is and what the page is, edge to edge */
+export function CareersHeader({ brand }: { brand: CareersBrand }) {
+  const website = safeWebsite(brand?.website);
+  return (
+    <header className="border-b border-slate-200 bg-linear-to-r from-sky-50 via-sky-50/40 to-sky-50 dark:border-neutral-800 dark:from-sky-950 dark:via-neutral-900 dark:to-sky-950">
+      <div className={`${pageWidth} py-8 sm:py-10`}>
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <div className="flex min-w-0 items-center gap-4">
+            {brand?.logoUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={brand.logoUrl}
+                alt=""
+                className="h-12 w-auto max-w-[180px] shrink-0 object-contain object-left sm:h-14"
+              />
+            )}
+            <h1 className="min-w-0 text-3xl font-semibold leading-tight tracking-tight text-slate-900 sm:text-[40px] dark:text-neutral-100">
+              {brand?.name ? `Careers at ${brand.name}` : "Careers"}
+            </h1>
+          </div>
+          {website && (
+            <a
+              href={website}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex shrink-0 items-center gap-1 text-base font-medium text-slate-600 hover:text-slate-900 dark:text-neutral-400 dark:hover:text-neutral-100"
+            >
+              Visit website
+              <HugeiconsIcon icon={ArrowUpRight01Icon} className="size-5" strokeWidth={1.75} />
+            </a>
+          )}
+        </div>
+        {brand?.description && <CompanyDescription text={brand.description} />}
+      </div>
+    </header>
   );
 }
 
@@ -124,7 +169,7 @@ function FilterSelect({
   const items = [{ value: ALL, label: allLabel }, ...options];
   return (
     <Select items={items} value={value} onValueChange={(v) => onChange(v ?? ALL)}>
-      <SelectTrigger aria-label={label} className={`${fieldCls} w-full px-3 sm:w-36`}>
+      <SelectTrigger aria-label={label} className={`${fieldCls} w-full px-4 sm:w-52`}>
         <SelectValue placeholder={allLabel} />
       </SelectTrigger>
       <SelectContent>
@@ -158,31 +203,49 @@ export function CareersJobsList({
   const groups = useMemo(() => groupByDepartment(filtered), [filtered]);
 
   const isFiltered = hasActiveFilters(filters);
-  // A dropdown with one possible value would filter nothing, so only offer real choices.
+  // Only show dropdowns with real choices
   const showDepartment = departments.length > 1;
   const showType = types.length > 1;
   const showLocation = locations.length > 1;
-  // A single department's name above every role says nothing.
+  // Hide the department if there is only one
   const showDepartmentHeadings = departments.length > 1;
 
   return (
     <div>
-      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
-        <CareersTitleBar brand={brand} />
+      <CareersHeader brand={brand} />
 
-        <div className="flex w-full flex-wrap items-center gap-2 md:ml-auto md:w-auto">
-          <div className="relative min-w-0 flex-1 md:w-52 md:flex-none">
-            {/* z-10: the field briefly transforms while pressed, and would paint over the icon. */}
+      <main className={`${pageWidth} pb-24 pt-8`}>
+        <div className="flex items-baseline gap-2">
+          <h2 className="text-2xl font-semibold text-slate-900 dark:text-neutral-100">Open roles</h2>
+          <p aria-live="polite" className="text-sm text-slate-500 dark:text-neutral-400">
+            {isFiltered ? `${filtered.length} of ${jobs.length}` : jobs.length}
+            {isFiltered && (
+              <>
+                {" · "}
+                <button
+                  type="button"
+                  onClick={() => setFilters(NO_FILTERS)}
+                  className="cursor-pointer font-medium text-slate-800 underline underline-offset-4 hover:text-slate-950 dark:text-neutral-200 dark:hover:text-white"
+                >
+                  Clear filters
+                </button>
+              </>
+            )}
+          </p>
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <div className="relative min-w-60 flex-1">
             <HugeiconsIcon
               icon={Search01Icon}
-              className="pointer-events-none absolute left-3 top-1/2 z-10 size-4 -translate-y-1/2 text-slate-400 dark:text-neutral-500"
+              className="pointer-events-none absolute left-4 top-1/2 z-10 size-5 -translate-y-1/2 text-slate-400 dark:text-neutral-500"
             />
             <Input
               aria-label="Search roles"
-              placeholder="Search roles"
+              placeholder="Search for roles"
               value={filters.search}
               onChange={(e) => set("search", e.target.value)}
-              className={`${fieldCls} pl-9`}
+              className={`${fieldCls} pl-11`}
             />
           </div>
 
@@ -214,54 +277,33 @@ export function CareersJobsList({
             />
           )}
         </div>
-      </div>
 
-      {/* Closes the top row; the roles start below it. */}
-      <hr className="my-5 border-t border-slate-200 dark:border-neutral-800" />
-
-      <p aria-live="polite" className="mb-4 text-sm text-slate-500 dark:text-neutral-400">
-        {isFiltered
-          ? `Showing ${filtered.length} of ${jobs.length} ${jobs.length === 1 ? "role" : "roles"}`
-          : `${jobs.length} open ${jobs.length === 1 ? "role" : "roles"}`}
-        {isFiltered && (
-          <>
-            {" · "}
-            <button
-              type="button"
-              onClick={() => setFilters(NO_FILTERS)}
-              className="cursor-pointer font-medium text-slate-800 underline underline-offset-4 hover:text-slate-950 dark:text-neutral-200 dark:hover:text-white"
-            >
-              Clear filters
-            </button>
-          </>
+        {filtered.length === 0 ? (
+          <p className="mt-6 rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center text-[15px] text-slate-500 dark:border-neutral-700 dark:text-neutral-400">
+            No roles match your search.
+          </p>
+        ) : (
+          <div className="mt-5 space-y-10">
+            {groups.map(({ department: name, jobs: deptJobs }) => (
+              <section key={name} aria-label={showDepartmentHeadings ? name : "Open roles"}>
+                {showDepartmentHeadings && (
+                  <h3 className="mb-3 flex items-baseline gap-2 text-base font-semibold text-slate-900 dark:text-neutral-100">
+                    {name}
+                    <span className="font-normal text-slate-500 dark:text-neutral-400">
+                      {deptJobs.length}
+                    </span>
+                  </h3>
+                )}
+                <ul className="space-y-2">
+                  {deptJobs.map((job) => (
+                    <JobRow key={job.id} job={job} now={now} nested={showDepartmentHeadings} />
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
         )}
-      </p>
-
-      {filtered.length === 0 ? (
-        <p className="rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center text-[15px] text-slate-500 dark:border-neutral-700 dark:text-neutral-400">
-          No roles match your search.
-        </p>
-      ) : (
-        <div className="space-y-10">
-          {groups.map(({ department: name, jobs: deptJobs }) => (
-            <section key={name} aria-label={showDepartmentHeadings ? name : "Open roles"}>
-              {showDepartmentHeadings && (
-                <h2 className="mb-3 flex items-baseline gap-2 text-sm font-semibold text-slate-900 dark:text-neutral-100">
-                  {name}
-                  <span className="font-normal text-slate-500 dark:text-neutral-400">
-                    {deptJobs.length}
-                  </span>
-                </h2>
-              )}
-              <ul className="space-y-3">
-                {deptJobs.map((job) => (
-                  <JobRow key={job.id} job={job} now={now} />
-                ))}
-              </ul>
-            </section>
-          ))}
-        </div>
-      )}
+      </main>
     </div>
   );
 }
