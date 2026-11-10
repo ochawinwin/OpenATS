@@ -152,17 +152,29 @@ type TlActivity = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// One shared pause for every parallel request: when TalentLyft says 429, all of them wait, not just
+// the one that was refused. Otherwise four workers keep hitting the limit and use up their retries.
+let pausedUntil = 0;
+
 async function tl<T>(path: string): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    const wait = pausedUntil - Date.now();
+    if (wait > 0) await sleep(wait);
+
     const res = await fetch(`${TL_BASE}${path}`, {
       headers: { Authorization: `Bearer ${process.env.TALENTLYFT_API_KEY}` },
     });
     if (res.ok) return (await res.json()) as T;
+
     const retryable = res.status === 429 || res.status >= 500;
-    if (!retryable || attempt >= 5) {
+    if (!retryable || attempt >= 12) {
       throw new Error(`TalentLyft ${res.status} on ${path}: ${(await res.text()).slice(0, 200)}`);
     }
-    await sleep(1000 * 2 ** attempt);
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const delay =
+      retryAfter > 0 ? retryAfter * 1000 : Math.min(60_000, 3000 * 2 ** Math.min(attempt, 5));
+    pausedUntil = Math.max(pausedUntil, Date.now() + delay);
+    console.log(`  TalentLyft ${res.status}, pausing ${Math.round(delay / 1000)}s (attempt ${attempt + 1})`);
   }
 }
 
