@@ -313,7 +313,16 @@
         </div>
 
         <div id="openats-jobs"></div>
-        <script src="https://frontend-production-69c2.up.railway.app/embed.js" data-instance="https://frontend-production-69c2.up.railway.app"></script>
+        <script>
+          // This page is served by the same app that owns the jobs, so the embed reads whichever
+          // address the page was opened on (the railway.app one or careers.futureskill.co).
+          (function () {
+            var s = document.createElement("script");
+            s.src = location.origin + "/embed.js";
+            s.setAttribute("data-instance", location.origin);
+            document.body.appendChild(s);
+          })();
+        </script>
 
         <p class="jobs__empty" id="jobs-empty">No positions match your search.</p>
       </div>
